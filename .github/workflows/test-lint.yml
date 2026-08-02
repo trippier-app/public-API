@@ -1,0 +1,51 @@
+name: Test & Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-go-poi:
+    name: Test poi-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache-dependency-path: poi-api/go.sum
+      - run: go test -race ./...
+        working-directory: poi-api
+
+  test-python:
+    name: Test itinerary-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements-dev.txt && pytest --tb=short
+        working-directory: itinerary-api
+
+  lint-go-poi:
+    name: Lint poi-api
+    runs-on: ubuntu-latest
+    container: golangci/golangci-lint:v2.12.2
+    steps:
+      - uses: actions/checkout@v7
+      - run: git config --global --add safe.directory '*'
+      - run: golangci-lint run --timeout 5m
+        working-directory: poi-api
+
+  lint-python:
+    name: Lint itinerary-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements-dev.txt && ruff check . && mypy app
+        working-directory: itinerary-api

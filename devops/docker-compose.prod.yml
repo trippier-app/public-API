@@ -1,0 +1,90 @@
+# public-API production stack (VPS): Traefik + Let's Encrypt, images pulled from
+# GHCR. Self-contained: the deploy pipeline copies only this file to the host.
+# Requires DOMAIN, ACME_EMAIL, OWNER and the optional provider keys in .env.
+#
+# poi-api       -> https://api.poi.$DOMAIN
+# itinerary-api -> https://api.ai.$DOMAIN
+
+name: trippier-public-api
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  traefik:
+    image: traefik:v3.7
+    <<: *defaults
+    environment:
+      DOCKER_API_VERSION: "1.54"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.httpchallenge=true"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--log.level=INFO"
+
+  redis:
+    image: redis:7-alpine
+    <<: *defaults
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  poi-api:
+    image: ghcr.io/${OWNER:-trippier-app}/poi-api:${IMAGE_TAG:-latest}
+    <<: *defaults
+    env_file: .env
+    environment:
+      POI_AUTH_DISABLED: "true"
+      POI_REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.poi-api.rule=Host(`api.poi.${DOMAIN}`)"
+      - "traefik.http.routers.poi-api.entrypoints=websecure"
+      - "traefik.http.routers.poi-api.tls.certresolver=le"
+      - "traefik.http.services.poi-api.loadbalancer.server.port=8080"
+
+  itinerary-api:
+    image: ghcr.io/${OWNER:-trippier-app}/itinerary-api:${IMAGE_TAG:-latest}
+    <<: *defaults
+    env_file: .env
+    environment:
+      AUTH_DISABLED: "true"
+      POI_API_URL: http://poi-api:8080
+    depends_on:
+      poi-api:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.itinerary-api.rule=Host(`api.ai.${DOMAIN}`)"
+      - "traefik.http.routers.itinerary-api.entrypoints=websecure"
+      - "traefik.http.routers.itinerary-api.tls.certresolver=le"
+      - "traefik.http.services.itinerary-api.loadbalancer.server.port=8000"
+
+volumes:
+  redis_data:

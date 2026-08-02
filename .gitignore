@@ -1,0 +1,23 @@
+.env
+.env.*.local
+
+# Go
+*/bin/
+*/vendor/
+*/*.out
+*/tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp

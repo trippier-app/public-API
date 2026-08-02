@@ -1,0 +1,285 @@
+package search_test
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/trippier/poi-api/internal/providers"
+	"github.com/trippier/poi-api/internal/search"
+	"github.com/trippier/poi-api/pkg/types"
+	"go.uber.org/zap"
+)
+
+// mockProvider is a test double for providers.Provider.
+type mockProvider struct {
+	name      types.Provider
+	modes     []types.SearchMode
+	returnErr error
+	pois      []types.RawPoi
+}
+
+func (m *mockProvider) Name() types.Provider { return m.name }
+
+func (m *mockProvider) SupportsMode(mode types.SearchMode) bool {
+	for _, mo := range m.modes {
+		if mo == mode {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *mockProvider) Search(_ context.Context, _ types.SearchQuery) ([]types.RawPoi, error) {
+	return m.pois, m.returnErr
+}
+
+var _ providers.Provider = (*mockProvider)(nil)
+
+func newCoords(lat, lng float64) *types.Coordinates {
+	return &types.Coordinates{Lat: lat, Lng: lng}
+}
+
+func TestServiceSearch_BasicRadius(t *testing.T) {
+	pois := []types.RawPoi{
+		{ID: "overpass:1", Name: "Louvre", Type: types.TypeSee,
+			Provider: types.ProviderOverpass, Coords: newCoords(48.8606, 2.3376)},
+		{ID: "overpass:2", Name: "Notre-Dame", Type: types.TypeSee,
+			Provider: types.ProviderOverpass, Coords: newCoords(48.8530, 2.3499)},
+	}
+
+	p := &mockProvider{
+		name:  types.ProviderOverpass,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois:  pois,
+	}
+
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+
+	q := types.SearchQuery{
+		Mode:      types.ModeRadius,
+		Lat:       48.8566,
+		Lng:       2.3522,
+		Radius:    5000,
+		Providers: []types.Provider{types.ProviderOverpass},
+		Limit:     20,
+		Lang:      "en",
+	}
+
+	result, err := svc.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 2 {
+		t.Errorf("expected 2 results, got %d", result.Total)
+	}
+}
+
+func TestServiceSearch_Pagination(t *testing.T) {
+	var pois []types.RawPoi
+	for i := 0; i < 10; i++ {
+		pois = append(pois, types.RawPoi{
+			ID:       fmt.Sprintf("overpass:%d", i),
+			Name:     fmt.Sprintf("Place %d", i),
+			Provider: types.ProviderOverpass,
+			Coords:   newCoords(48.80+float64(i)*0.01, 2.35),
+		})
+	}
+
+	p := &mockProvider{
+		name:  types.ProviderOverpass,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois:  pois,
+	}
+
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+
+	q := types.SearchQuery{
+		Mode:      types.ModeRadius,
+		Lat:       48.85,
+		Lng:       2.35,
+		Radius:    15_000,
+		Providers: []types.Provider{types.ProviderOverpass},
+		Limit:     3,
+		Offset:    0,
+		Lang:      "en",
+	}
+
+	result, err := svc.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Results) != 3 {
+		t.Errorf("expected 3 paginated results, got %d", len(result.Results))
+	}
+	if result.Total != 10 {
+		t.Errorf("total should be 10, got %d", result.Total)
+	}
+}
+
+func TestServiceSearch_UnsupportedModeSkipped(t *testing.T) {
+	p := &mockProvider{
+		name:  types.ProviderOverpass,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois: []types.RawPoi{
+			{ID: "overpass:1", Name: "Musée", Provider: types.ProviderOverpass,
+				Coords: newCoords(48.85, 2.35)},
+		},
+	}
+
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+
+	q := types.SearchQuery{
+		Mode:      types.ModePolygon,
+		Polygon:   "48.84 2.34 48.86 2.34 48.86 2.36 48.84 2.36",
+		Providers: []types.Provider{types.ProviderOverpass},
+		Limit:     20,
+		Lang:      "en",
+	}
+
+	result, err := svc.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 0 {
+		t.Errorf("expected 0 results (provider skipped), got %d", result.Total)
+	}
+}
+
+func TestServiceSearch_MinScore(t *testing.T) {
+	p := &mockProvider{
+		name:  types.ProviderOverpass,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois: []types.RawPoi{
+			{ID: "overpass:1", Name: "POI", Provider: types.ProviderOverpass,
+				Coords: newCoords(48.85, 2.35)},
+		},
+	}
+
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+
+	q := types.SearchQuery{
+		Mode:      types.ModeRadius,
+		Lat:       48.85,
+		Lng:       2.35,
+		Radius:    5000,
+		Providers: []types.Provider{types.ProviderOverpass},
+		Limit:     20,
+		MinScore:  99,
+		Lang:      "en",
+	}
+
+	result, err := svc.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Total != 0 {
+		t.Errorf("min_score=99 should filter everything out, got %d", result.Total)
+	}
+}
+
+// TestServiceSearch_DropsCrossProviderHintsWhenProviderNotSelected confirms
+// fetchAll output only surfaces providers the user actually selected, dropping
+// cross-provider hints (e.g. a Wikivoyage listing hinting at a Wikipedia article).
+func TestServiceSearch_DropsCrossProviderHintsWhenProviderNotSelected(t *testing.T) {
+	wikivoyagePois := []types.RawPoi{
+		{
+			ID: "wikivoyage:zone:Foo", Name: "Foo", Type: types.TypeSee,
+			Provider: types.ProviderWikivoyage,
+			Coords:   newCoords(48.86, 2.30),
+		},
+		{
+			ID: "wikipedia:zone:Foo", Name: "Foo", Type: types.TypeSee,
+			Provider:  types.ProviderWikipedia,
+			Coords:    newCoords(48.86, 2.30),
+			SourceURL: "https://en.wikipedia.org/wiki/Foo",
+		},
+	}
+	p := &mockProvider{
+		name:  types.ProviderWikivoyage,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois:  wikivoyagePois,
+	}
+
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+
+	t.Run("wikipedia not selected drops the hint", func(t *testing.T) {
+		q := types.SearchQuery{
+			Mode: types.ModeRadius, Lat: 48.86, Lng: 2.30, Radius: 5000,
+			Providers: []types.Provider{types.ProviderWikivoyage},
+			Limit:     20, Lang: "en",
+		}
+		result, err := svc.Search(context.Background(), q)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if result.Total != 1 {
+			t.Fatalf("Total = %d, want 1 (wikipedia hint must be filtered)", result.Total)
+		}
+		for _, src := range result.Results[0].Sources {
+			if src.Provider == types.ProviderWikipedia {
+				t.Errorf("Sources unexpectedly contains wikipedia: %v", result.Results[0].Sources)
+			}
+		}
+	})
+
+	t.Run("wikipedia selected keeps the hint and merges", func(t *testing.T) {
+		q := types.SearchQuery{
+			Mode: types.ModeRadius, Lat: 48.86, Lng: 2.30, Radius: 5000,
+			Providers: []types.Provider{types.ProviderWikivoyage, types.ProviderWikipedia},
+			Limit:     20, Lang: "en",
+		}
+		result, err := svc.Search(context.Background(), q)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if result.Total != 1 {
+			t.Fatalf("Total = %d, want 1 merged POI", result.Total)
+		}
+		got := result.Results[0]
+		var wikipediaLink, wikivoyageLink *types.SourceLink
+		for i, src := range got.Sources {
+			if src.Provider == types.ProviderWikipedia {
+				wikipediaLink = &got.Sources[i]
+			}
+			if src.Provider == types.ProviderWikivoyage {
+				wikivoyageLink = &got.Sources[i]
+			}
+		}
+		if wikipediaLink == nil || wikivoyageLink == nil {
+			t.Errorf("Sources = %v, want both wikipedia and wikivoyage", got.Sources)
+		}
+		if wikipediaLink != nil && wikipediaLink.URL != "https://en.wikipedia.org/wiki/Foo" {
+			t.Errorf("wikipedia SourceLink.URL = %q, want the hint URL", wikipediaLink.URL)
+		}
+	})
+}
+
+func TestParseWeights(t *testing.T) {
+	tests := []struct {
+		raw     string
+		wantLen int
+		wantErr bool
+	}{
+		{"", 0, false},
+		{`{"see":1,"eat":0.5}`, 2, false},
+		{`{"see":0,"do":0.8}`, 2, false},
+		{`{"see":2,"eat":1}`, 0, true},
+		{`{"see":-0.1}`, 0, true},
+		{`not-json`, 0, true},
+	}
+
+	for _, tc := range tests {
+		weights, err := search.ParseWeights(tc.raw)
+		if tc.wantErr && err == nil {
+			t.Errorf("ParseWeights(%q) expected error", tc.raw)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("ParseWeights(%q) unexpected error: %v", tc.raw, err)
+		}
+		if !tc.wantErr && len(weights) != tc.wantLen {
+			t.Errorf("ParseWeights(%q) len = %d, want %d", tc.raw, len(weights), tc.wantLen)
+		}
+	}
+}

@@ -1,0 +1,158 @@
+// Package main is the entry point of the poi-api server, wiring configuration, providers, and the HTTP router together.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+
+	"github.com/trippier/poi-api/internal/config"
+	"github.com/trippier/poi-api/internal/middleware"
+	"github.com/trippier/poi-api/internal/providers"
+	"github.com/trippier/poi-api/internal/search"
+
+	_ "github.com/trippier/poi-api/internal/providers/eventbrite"
+	_ "github.com/trippier/poi-api/internal/providers/geonames"
+	_ "github.com/trippier/poi-api/internal/providers/overpass"
+	_ "github.com/trippier/poi-api/internal/providers/ticketmaster"
+	_ "github.com/trippier/poi-api/internal/providers/wikipedia"
+	_ "github.com/trippier/poi-api/internal/providers/wikivoyage"
+)
+
+// main wires configuration, providers, and the HTTP server, then runs until a shutdown signal.
+func main() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+
+	log := buildLogger(cfg.LogLevel)
+	defer log.Sync() //nolint:errcheck
+
+	if cfg.GeoNamesUsername == "" {
+		log.Info("POI_GEONAMES_USERNAME not set — geonames provider will be disabled")
+	}
+
+	rdb, err := buildRedis(cfg.RedisURL)
+	if err != nil {
+		log.Fatal("redis url", zap.Error(err))
+	}
+
+	cacheTTL := time.Duration(cfg.CacheTTLSeconds) * time.Second
+	pp, err := providers.BuildAll(providers.BuildConfig{
+		Lang:             cfg.Lang,
+		GeoNamesUsername: cfg.GeoNamesUsername,
+		Redis:            rdb,
+		CacheTTL:         cacheTTL,
+		Log:              log,
+	})
+	if err != nil {
+		log.Fatal("build providers", zap.Error(err))
+	}
+	svc := search.NewService(pp, time.Duration(cfg.ProviderTimeout)*time.Second, log)
+	handler := search.NewHandler(svc)
+
+	globalAuth, eventsAuth := buildAuthMiddlewares(cfg)
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.SetTrustedProxies(nil) //nolint:errcheck
+	r.Use(
+		gin.Recovery(),
+		middleware.CORS(),
+		middleware.SecureHeaders(),
+		middleware.RequestID(),
+		middleware.Logger(log),
+		globalAuth,
+	)
+
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	v1 := r.Group("/v1")
+
+	pois := v1.Group("/pois")
+	pois.Use(middleware.Cache(rdb, cacheTTL))
+	handler.RegisterRoutes(pois)
+
+	events := pois.Group("/events")
+	events.Use(eventsAuth)
+	handler.RegisterEventRoutes(events)
+
+	srv := &http.Server{
+		Addr:         fmt.Sprintf(":%s", cfg.Port),
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	go func() {
+		log.Info("poi-api starting", zap.String("addr", srv.Addr))
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("server error", zap.Error(err))
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Info("shutting down server…")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Error("shutdown error", zap.Error(err))
+	}
+	log.Info("server stopped")
+}
+
+// buildAuthMiddlewares builds the global and event rate-limit middlewares from
+// cfg, returning no-op passthroughs when AUTH_DISABLED is true.
+func buildAuthMiddlewares(cfg *config.Config) (global, events gin.HandlerFunc) {
+	if cfg.AuthDisabled {
+		return middleware.Passthrough(), middleware.Passthrough()
+	}
+	global = middleware.RateLimit(cfg.AuthAPIURL, cfg.InternalSecret, 1,
+		"/health", "/v1/pois/events", "/v1/pois/events/slim", "/v1/pois/events/custom", "/v1/pois/events/custom/slim")
+	events = middleware.RateLimit(cfg.AuthAPIURL, cfg.InternalSecret, 10)
+	return global, events
+}
+
+// buildLogger creates a zap logger, production-configured unless level is
+// "debug", in which case the development logger is used. It returns the
+// configured logger.
+func buildLogger(level string) *zap.Logger {
+	var cfg zap.Config
+	if level == "debug" {
+		cfg = zap.NewDevelopmentConfig()
+	} else {
+		cfg = zap.NewProductionConfig()
+	}
+	log, err := cfg.Build()
+	if err != nil {
+		panic(fmt.Sprintf("build logger: %v", err))
+	}
+	return log
+}
+
+// buildRedis parses redisURL and creates a client for it. It returns the
+// connected Redis client, or an error if the URL cannot be parsed.
+func buildRedis(redisURL string) (*redis.Client, error) {
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, err
+	}
+	return redis.NewClient(opt), nil
+}

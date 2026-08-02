@@ -1,0 +1,67 @@
+# public-API base stack: images, ports and env for poi-api + itinerary-api.
+# Runs without auth (public, no accounts). Two layers sit on top of this file:
+#
+#   docker-compose.dev.yml      hot reload    (added by `make up` and `make dev`)
+#   docker-compose.traefik.yml  reverse proxy (added by `make dev` only)
+#
+#   make up      -> hot reload, detached, published ports (no Traefik)
+#   make dev     -> hot reload + Traefik on *.trippier.localhost
+#   make build   -> build both images      make push -> publish to the registry
+#
+
+name: trippier-public-api
+
+x-defaults: &defaults
+  restart: unless-stopped
+
+services:
+
+  ############################### Infrastructure ###############################
+
+  redis:
+    image: redis:7-alpine
+    <<: *defaults
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ################################ poi-api (Go) ################################
+
+  poi-api:
+    image: ${REGISTRY:-ghcr.io}/${OWNER:-trippier-app}/poi-api:${TAG:-latest}
+    build:
+      context: ./poi-api
+    <<: *defaults
+    ports:
+      - "${POI_API_PORT:-8080}:8080"
+    env_file: .env
+    environment:
+      POI_AUTH_DISABLED: "true"
+      POI_REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  ########################### itinerary-api (Python) ###########################
+
+  itinerary-api:
+    image: ${REGISTRY:-ghcr.io}/${OWNER:-trippier-app}/itinerary-api:${TAG:-latest}
+    build:
+      context: ./itinerary-api
+    <<: *defaults
+    ports:
+      - "${ITINERARY_API_PORT:-8000}:8000"
+    env_file: .env
+    environment:
+      AUTH_DISABLED: "true"
+      POI_API_URL: http://poi-api:8080
+    depends_on:
+      poi-api:
+        condition: service_started
+
+volumes:
+  redis_data:

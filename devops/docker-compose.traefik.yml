@@ -1,0 +1,43 @@
+# Traefik layer, added ONLY by `make dev`. Publishes each service behind a
+# local reverse proxy on *.trippier.localhost (the .localhost TLD resolves to
+# 127.0.0.1 natively, with no /etc/hosts edits needed).
+#
+#   http://api.poi.trippier.localhost   -> poi-api
+#   http://api.ai.trippier.localhost    -> itinerary-api
+#   http://traefik.trippier.localhost   -> Traefik dashboard (also on :8090)
+
+services:
+
+  traefik:
+    image: traefik:v3.7
+    restart: unless-stopped
+    environment:
+      DOCKER_API_VERSION: "1.54"
+    ports:
+      - "80:80"
+      - "8090:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--log.level=INFO"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.trippier.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+  poi-api:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.poi-api.rule=Host(`api.poi.trippier.localhost`)"
+      - "traefik.http.services.poi-api.loadbalancer.server.port=8080"
+
+  itinerary-api:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.itinerary-api.rule=Host(`api.ai.trippier.localhost`)"
+      - "traefik.http.services.itinerary-api.loadbalancer.server.port=8000"

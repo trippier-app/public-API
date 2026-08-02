@@ -1,0 +1,23 @@
+# Hot-reload layer, added by BOTH `make up` and `make dev`.
+# Rebuilds each service from its Dockerfile.dev, mounts the source, and runs a
+# live-reload command (air for Go, uvicorn --reload for Python). No Traefik here
+# (that lives in docker-compose.traefik.yml, added only by `make dev`).
+
+services:
+
+  poi-api:
+    build:
+      dockerfile: Dockerfile.dev
+    environment:
+      POI_LOG_LEVEL: debug
+    volumes:
+      - ./poi-api:/app
+      - poi-api-tmp:/app/tmp
+
+  itinerary-api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./itinerary-api:/app
+
+volumes:
+  poi-api-tmp:
