@@ -3,7 +3,7 @@
 # Requires DOMAIN, ACME_EMAIL, OWNER and the optional provider keys in .env.
 #
 # poi-api       -> https://api.poi.$DOMAIN
-# itinerary-api -> https://api.ai.$DOMAIN
+# itinerary-api -> https://api.itinerary.$DOMAIN
 
 name: trippier-public-api
 
@@ -81,7 +81,7 @@ services:
         condition: service_started
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.itinerary-api.rule=Host(`api.ai.${DOMAIN}`)"
+      - "traefik.http.routers.itinerary-api.rule=Host(`api.itinerary.${DOMAIN}`)"
       - "traefik.http.routers.itinerary-api.entrypoints=websecure"
       - "traefik.http.routers.itinerary-api.tls.certresolver=le"
       - "traefik.http.services.itinerary-api.loadbalancer.server.port=8000"
