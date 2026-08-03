@@ -1,0 +1,38 @@
+# The shared Traefik itself, added by `make dev` only when no other trippier
+# stack is already running it. First stack up owns the trippier-traefik
+# container; the others just attach to the trippier-edge network and get routed
+# by that same instance. Identical in every trippier repo.
+
+services:
+
+  traefik:
+    image: traefik:v3.7
+    container_name: trippier-traefik
+    restart: unless-stopped
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-8100}:80"
+      - "${TRAEFIK_DASHBOARD_PORT:-8101}:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+      - label:disable
+    networks:
+      - edge
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=trippier-edge"
+      - "--entrypoints.web.address=:80"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--log.level=INFO"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.trippier.localhost`)"
+      - "traefik.http.routers.traefik.service=api@internal"
+
+networks:
+  edge:
+    external: true
+    name: trippier-edge

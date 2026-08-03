@@ -2,7 +2,13 @@ ENGINE   ?= docker
 COMPOSE  := $(ENGINE) compose
 
 COMPOSE_HOT := $(COMPOSE) --project-directory $(CURDIR) -f devops/docker-compose.yml -f devops/docker-compose.dev.yml
-COMPOSE_ALL := $(COMPOSE_HOT) -f devops/docker-compose.traefik.yml
+COMPOSE_ALL := $(COMPOSE_HOT) -f devops/docker-compose.traefik.yml -f devops/docker-compose.edge.yml
+COMPOSE_DEV  = $(COMPOSE_HOT) -f devops/docker-compose.traefik.yml $(EDGE_FILE)
+
+PROJECT    := trippier-public-api
+EDGE_NET   := trippier-edge
+TRAEFIK_CT := trippier-traefik
+EDGE_FILE   = $(if $(shell $(ENGINE) ps -q -f 'name=^$(TRAEFIK_CT)$$' -f status=running 2>/dev/null),,-f devops/docker-compose.edge.yml)
 
 REGISTRY ?= ghcr.io
 OWNER    ?= trippier-app
@@ -36,7 +42,7 @@ endif
 
 step = @printf "$(GRN)▶$(RST) %s\n"
 
-.PHONY: help setup doctor \
+.PHONY: help setup doctor check-ports \
 	dev dev-stop logs up down \
 	build push \
 	test test-go-poi test-python \
@@ -64,10 +70,22 @@ doctor:
 	@$(COMPOSE_ALL) config -q >/dev/null 2>&1 \
 		&& printf "  [ok] compose files are valid\n" \
 		|| printf "  [!!] compose files have errors\n"
+	@$(MAKE) --no-print-directory check-ports >/dev/null 2>&1 \
+		&& printf "  [ok] published ports are free\n" \
+		|| printf "  [!!] port conflict, run 'make check-ports'\n"
+
+check-ports:
+	@busy=""; \
+	for p in $$($(COMPOSE_HOT) config 2>/dev/null | sed -n 's/.*published: "\([0-9]*\)".*/\1/p' | sort -u); do \
+		owner=$$($(ENGINE) ps --format '{{.Label "com.docker.compose.project"}} {{.Ports}}' 2>/dev/null | grep ":$$p->" | head -1 | cut -d' ' -f1); \
+		if [ -n "$$owner" ] && [ "$$owner" != "$(PROJECT)" ]; then busy="$$busy $$p($$owner)"; \
+		elif [ -z "$$owner" ] && ss -ltnH "sport = :$$p" 2>/dev/null | grep -q .; then busy="$$busy $$p(host)"; fi; \
+	done; \
+	[ -z "$$busy" ] || { printf "  [!!] port already taken:$$busy\n  see PORTS.md at the trippier-org root\n"; exit 1; }
 
 ################################## Development #################################
 
-up:
+up: check-ports
 	$(step) "Starting stack (hot reload, detached, no Traefik)…"
 	@$(COMPOSE_HOT) up -d --build
 
@@ -75,9 +93,11 @@ down:
 	$(step) "Stopping stack…"
 	@$(COMPOSE_ALL) down
 
-dev:
-	$(step) "Starting dev stack (hot reload + Traefik on *.trippier.localhost)…"
-	@$(COMPOSE_ALL) up --build
+dev: check-ports
+	$(step) "Starting dev stack (hot reload + Traefik on *.trippier.localhost:8100)…"
+	@$(ENGINE) network inspect $(EDGE_NET) >/dev/null 2>&1 || $(ENGINE) network create $(EDGE_NET) >/dev/null
+	@[ -n "$$($(ENGINE) ps -q -f 'name=^$(TRAEFIK_CT)$$' -f status=running)" ] || $(ENGINE) rm -f $(TRAEFIK_CT) >/dev/null 2>&1 || true
+	@$(COMPOSE_DEV) up --build
 
 dev-stop:
 	$(step) "Stopping dev stack (removing volumes)…"
@@ -143,7 +163,7 @@ help:
 	@printf "  $(CYAN)setup$(RST)\t\t Create .env from .env.example\n"
 	@printf "  $(CYAN)doctor$(RST)\t Check the machine is ready to run the stack\n"
 	@printf "  $(CYAN)up$(RST) / $(CYAN)down$(RST)\t Hot reload on published ports (detached, no Traefik)\n"
-	@printf "  $(CYAN)dev$(RST)\t\t Hot reload + Traefik on *.trippier.localhost (Ctrl-C to stop)\n"
+	@printf "  $(CYAN)dev$(RST)\t\t Hot reload + shared Traefik on *.trippier.localhost:8100 (Ctrl-C to stop)\n"
 	@printf "  $(CYAN)dev-stop$(RST)\t Stop the dev stack (removes volumes)\n"
 	@printf "  $(CYAN)logs$(RST)\t\t Follow logs (make logs SERVICE=poi-api)\n"
 	@printf "\n$(BOLD)Images$(RST)\n"
@@ -153,5 +173,6 @@ help:
 	@printf "  $(CYAN)test$(RST)\t\t Test both services in throwaway containers\n"
 	@printf "  $(CYAN)tidy$(RST)\t\t go mod tidy the Go service\n"
 	@printf "  $(CYAN)clean$(RST)\t\t Tear down the stack with volumes\n"
-	@printf "\n$(DIM)Per-service: lint-go-poi/-python, test-go-poi/-python.$(RST)\n"
+	@printf "\n$(DIM)Host ports are listed in PORTS.md at the trippier-org root.$(RST)\n"
+	@printf "$(DIM)Per-service: lint-go-poi/-python, test-go-poi/-python.$(RST)\n"
 	@printf "$(DIM)Swap the engine with ENGINE=podman. Override images with OWNER= TAG=.$(RST)\n"

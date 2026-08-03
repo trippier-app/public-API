@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM python:3.14-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,7 +15,6 @@ FROM python:3.14-slim AS release
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# curl powers the container HEALTHCHECK.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
