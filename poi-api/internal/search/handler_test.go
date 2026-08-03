@@ -16,7 +16,7 @@ import (
 )
 
 func newRouter(pp ...providers.Provider) *gin.Engine {
-	svc := search.NewService(pp, 5*time.Second, zap.NewNop())
+	svc := search.NewService(pp, 5*time.Second, 0, zap.NewNop())
 	h := search.NewHandler(svc)
 	r := gin.New()
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
@@ -191,7 +191,7 @@ func TestServiceSearchEvents(t *testing.T) {
 				Provider: types.ProviderWikipediaEvents, Coords: newCoords(48.86, 2.35)},
 		},
 	}
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 	result, err := svc.SearchEvents(context.Background(), types.SearchQuery{
 		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 5000,
 		Providers: []types.Provider{types.ProviderWikipediaEvents},
@@ -206,7 +206,7 @@ func TestServiceSearchEvents(t *testing.T) {
 
 func TestServiceProvidersStatus(t *testing.T) {
 	p := &mockProvider{name: types.ProviderOverpass, modes: []types.SearchMode{types.ModeRadius}}
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 	statuses := svc.ProvidersStatus(context.Background())
 	if len(statuses) != 1 {
 		t.Fatalf("len = %d, want 1", len(statuses))

@@ -18,7 +18,10 @@ import (
 	"github.com/trippier/poi-api/internal/config"
 	"github.com/trippier/poi-api/internal/middleware"
 	"github.com/trippier/poi-api/internal/providers"
+	"github.com/trippier/poi-api/internal/registry"
 	"github.com/trippier/poi-api/internal/search"
+	"github.com/trippier/poi-api/internal/tilecache"
+	"github.com/trippier/poi-api/pkg/types"
 
 	_ "github.com/trippier/poi-api/internal/providers/eventbrite"
 	_ "github.com/trippier/poi-api/internal/providers/geonames"
@@ -27,6 +30,37 @@ import (
 	_ "github.com/trippier/poi-api/internal/providers/wikipedia"
 	_ "github.com/trippier/poi-api/internal/providers/wikivoyage"
 )
+
+// wrapPoiProviders decorates every place-kind provider in pp with the H3 tile
+// cache, so caching is a property of the wiring rather than of each provider's
+// init(). Event providers stay direct: the tile key carries no date, and a
+// cached slot would serve yesterday's events for today's query.
+func wrapPoiProviders(pp []providers.Provider, rdb *redis.Client, ttl time.Duration, log *zap.Logger) []providers.Provider {
+	out := make([]providers.Provider, 0, len(pp))
+	for _, p := range pp {
+		if servesEvents(p.Name()) {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, tilecache.NewCachedProvider(p, rdb, ttl, log))
+	}
+	return out
+}
+
+// servesEvents reports whether the registry lists provider id as producing
+// time-bound events (unknown providers count as events, staying uncached).
+func servesEvents(id types.Provider) bool {
+	meta, ok := registry.All[id]
+	if !ok {
+		return true
+	}
+	for _, k := range meta.Kinds {
+		if k == types.KindEvent {
+			return true
+		}
+	}
+	return false
+}
 
 // main wires configuration, providers, and the HTTP server, then runs until a shutdown signal.
 func main() {
@@ -59,7 +93,10 @@ func main() {
 	if err != nil {
 		log.Fatal("build providers", zap.Error(err))
 	}
-	svc := search.NewService(pp, time.Duration(cfg.ProviderTimeout)*time.Second, log)
+	pp = wrapPoiProviders(pp, rdb, cacheTTL, log)
+	svc := search.NewService(pp,
+		time.Duration(cfg.ProviderTimeout)*time.Second,
+		time.Duration(cfg.MergeTimeout)*time.Second, log)
 	handler := search.NewHandler(svc)
 
 	globalAuth, eventsAuth := buildAuthMiddlewares(cfg)

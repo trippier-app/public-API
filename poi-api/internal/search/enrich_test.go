@@ -42,7 +42,7 @@ func ec(lat, lng float64) *types.Coordinates {
 }
 
 func newServiceWithEnricher(e *stubEnricher) *Service {
-	return NewService([]providers.Provider{e}, 1*time.Second, zap.NewNop())
+	return NewService([]providers.Provider{e}, 1*time.Second, 0, zap.NewNop())
 }
 
 func TestEnrichRaw_AppliesEnricherWithinRadius(t *testing.T) {
@@ -108,7 +108,7 @@ func TestEnrichRaw_SkipsApproximateCoords(t *testing.T) {
 
 func TestEnrichRaw_NoEnrichers_LeavesRawUnchanged(t *testing.T) {
 	plain := &stubProvider{name: types.ProviderOverpass}
-	svc := NewService([]providers.Provider{plain}, 1*time.Second, zap.NewNop())
+	svc := NewService([]providers.Provider{plain}, 1*time.Second, 0, zap.NewNop())
 	raw := []types.RawPoi{
 		{Provider: types.ProviderGeoNames, Coords: ec(48.85837, 2.29450)},
 	}

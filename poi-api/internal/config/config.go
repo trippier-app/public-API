@@ -13,6 +13,7 @@ type Config struct {
 	RedisURL         string
 	CacheTTLSeconds  int
 	ProviderTimeout  int
+	MergeTimeout     int
 	GeoNamesUsername string
 	Lang             string
 	LogLevel         string
@@ -34,6 +35,7 @@ func Load() (*Config, error) {
 	v.SetDefault("redis_url", "redis://localhost:6379")
 	v.SetDefault("cache_ttl_seconds", 86400)
 	v.SetDefault("provider_timeout", 8)
+	v.SetDefault("merge_timeout", 3)
 	v.SetDefault("log_level", "info")
 	v.SetDefault("lang", "en")
 	v.SetDefault("auth_api_url", "http://auth-api:8081")
@@ -44,6 +46,7 @@ func Load() (*Config, error) {
 		RedisURL:         v.GetString("redis_url"),
 		CacheTTLSeconds:  v.GetInt("cache_ttl_seconds"),
 		ProviderTimeout:  v.GetInt("provider_timeout"),
+		MergeTimeout:     v.GetInt("merge_timeout"),
 		GeoNamesUsername: v.GetString("geonames_username"),
 		Lang:             v.GetString("lang"),
 		LogLevel:         v.GetString("log_level"),

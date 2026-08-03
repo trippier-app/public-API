@@ -22,6 +22,7 @@ type mockProvider struct {
 	callCnt  atomic.Int32
 	lastQ    types.SearchQuery
 	response []types.RawPoi
+	err      error
 }
 
 func (m *mockProvider) Name() types.Provider               { return m.name }
@@ -29,6 +30,9 @@ func (m *mockProvider) SupportsMode(types.SearchMode) bool { return true }
 func (m *mockProvider) Search(_ context.Context, q types.SearchQuery) ([]types.RawPoi, error) {
 	m.callCnt.Add(1)
 	m.lastQ = q
+	if m.err != nil {
+		return nil, m.err
+	}
 	return m.response, nil
 }
 
@@ -232,4 +236,55 @@ func TestCachedProvider_OverlappingPan_FetchCenterShifts(t *testing.T) {
 		t.Errorf("expected fetch centre to shift east after pan, got %f (first %f)", m.lastQ.Lng, firstFetchCenterLng)
 	}
 	_ = firstFetchCenterLat
+}
+
+func TestCachedProvider_FetchError_ServesCoarseFallback(t *testing.T) {
+	pois := []types.RawPoi{makePoi("p1", 48.8566, 2.3522, types.TypeSee)}
+	m := newMock(pois)
+	cp, _ := newCacheHarness(t, m)
+
+	warm := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 5000,
+		Types: []types.PoiType{types.TypeSee},
+	}
+	if _, err := cp.Search(context.Background(), warm); err != nil {
+		t.Fatal(err)
+	}
+
+	m.err = context.DeadlineExceeded
+	fine := warm
+	fine.Radius = 500
+	got, err := cp.Search(context.Background(), fine)
+	if err != nil {
+		t.Fatalf("expected coarse fallback, got error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "p1" {
+		t.Errorf("expected the cached coarse POI back, got %v", got)
+	}
+}
+
+func TestCachedProvider_FetchError_TripsBreaker(t *testing.T) {
+	m := newMock(nil)
+	m.err = context.DeadlineExceeded
+	cp, _ := newCacheHarness(t, m)
+
+	q := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 1000,
+		Types: []types.PoiType{types.TypeSee},
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cp.Search(cancelled, q); err == nil {
+		t.Fatal("expected the first search to surface the upstream error")
+	}
+	if m.callCnt.Load() != 1 {
+		t.Fatalf("expected 1 upstream call, got %d", m.callCnt.Load())
+	}
+
+	if _, err := cp.Search(context.Background(), q); err != nil {
+		t.Fatalf("expected a silent cache-only answer under breaker, got %v", err)
+	}
+	if m.callCnt.Load() != 1 {
+		t.Errorf("expected the breaker to skip the upstream, got %d calls", m.callCnt.Load())
+	}
 }

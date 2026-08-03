@@ -22,7 +22,7 @@ func (b *byokMockProvider) IsByok() bool { return true }
 var _ providers.ByokProvider = (*byokMockProvider)(nil)
 
 func newSvc(pp ...providers.Provider) *search.Service {
-	return search.NewService(pp, 5*time.Second, zap.NewNop())
+	return search.NewService(pp, 5*time.Second, 0, zap.NewNop())
 }
 
 func TestSearchCustom_ExplicitProviders(t *testing.T) {

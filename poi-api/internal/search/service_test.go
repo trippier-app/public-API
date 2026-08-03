@@ -18,6 +18,8 @@ type mockProvider struct {
 	modes     []types.SearchMode
 	returnErr error
 	pois      []types.RawPoi
+	delay     time.Duration
+	searched  chan struct{}
 }
 
 func (m *mockProvider) Name() types.Provider { return m.name }
@@ -32,6 +34,12 @@ func (m *mockProvider) SupportsMode(mode types.SearchMode) bool {
 }
 
 func (m *mockProvider) Search(_ context.Context, _ types.SearchQuery) ([]types.RawPoi, error) {
+	if m.delay > 0 {
+		time.Sleep(m.delay)
+	}
+	if m.searched != nil {
+		m.searched <- struct{}{}
+	}
 	return m.pois, m.returnErr
 }
 
@@ -55,7 +63,7 @@ func TestServiceSearch_BasicRadius(t *testing.T) {
 		pois:  pois,
 	}
 
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 
 	q := types.SearchQuery{
 		Mode:      types.ModeRadius,
@@ -93,7 +101,7 @@ func TestServiceSearch_Pagination(t *testing.T) {
 		pois:  pois,
 	}
 
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 
 	q := types.SearchQuery{
 		Mode:      types.ModeRadius,
@@ -128,7 +136,7 @@ func TestServiceSearch_UnsupportedModeSkipped(t *testing.T) {
 		},
 	}
 
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 
 	q := types.SearchQuery{
 		Mode:      types.ModePolygon,
@@ -157,7 +165,7 @@ func TestServiceSearch_MinScore(t *testing.T) {
 		},
 	}
 
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 
 	q := types.SearchQuery{
 		Mode:      types.ModeRadius,
@@ -202,7 +210,7 @@ func TestServiceSearch_DropsCrossProviderHintsWhenProviderNotSelected(t *testing
 		pois:  wikivoyagePois,
 	}
 
-	svc := search.NewService([]providers.Provider{p}, 5*time.Second, zap.NewNop())
+	svc := search.NewService([]providers.Provider{p}, 5*time.Second, 0, zap.NewNop())
 
 	t.Run("wikipedia not selected drops the hint", func(t *testing.T) {
 		q := types.SearchQuery{
@@ -281,5 +289,53 @@ func TestParseWeights(t *testing.T) {
 		if !tc.wantErr && len(weights) != tc.wantLen {
 			t.Errorf("ParseWeights(%q) len = %d, want %d", tc.raw, len(weights), tc.wantLen)
 		}
+	}
+}
+
+func TestServiceSearch_MergeWindowAnswersWithoutStragglers(t *testing.T) {
+	fast := &mockProvider{
+		name:  types.ProviderWikivoyage,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois: []types.RawPoi{{ID: "wv:1", Name: "Louvre", Type: types.TypeSee,
+			Provider: types.ProviderWikivoyage, Coords: newCoords(48.8606, 2.3376)}},
+	}
+	slow := &mockProvider{
+		name:  types.ProviderOverpass,
+		modes: []types.SearchMode{types.ModeRadius},
+		pois: []types.RawPoi{{ID: "op:1", Name: "Notre-Dame", Type: types.TypeSee,
+			Provider: types.ProviderOverpass, Coords: newCoords(48.8530, 2.3499)}},
+		delay:    400 * time.Millisecond,
+		searched: make(chan struct{}, 1),
+	}
+
+	svc := search.NewService([]providers.Provider{fast, slow},
+		5*time.Second, 80*time.Millisecond, zap.NewNop())
+
+	q := types.SearchQuery{
+		Mode:      types.ModeRadius,
+		Lat:       48.8566,
+		Lng:       2.3522,
+		Radius:    5000,
+		Providers: []types.Provider{types.ProviderWikivoyage, types.ProviderOverpass},
+		Limit:     20,
+		Lang:      "en",
+	}
+
+	started := time.Now()
+	result, err := svc.Search(context.Background(), q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 300*time.Millisecond {
+		t.Errorf("expected an answer within the merge window, took %v", elapsed)
+	}
+	if result.Total != 1 {
+		t.Errorf("expected only the fast provider's result, got %d", result.Total)
+	}
+
+	select {
+	case <-slow.searched:
+	case <-time.After(2 * time.Second):
+		t.Error("expected the straggler to finish in the background")
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/trippier/poi-api/internal/dedup"
 	"github.com/trippier/poi-api/internal/geo"
@@ -28,6 +27,7 @@ const autoSelectThreshold = 0.10
 type Service struct {
 	providers       map[types.Provider]providers.Provider
 	providerTimeout time.Duration
+	mergeWindow     time.Duration
 	log             *zap.Logger
 	// selectionCache memoises selectByCountry results for the common no-override
 	// path, keyed by (country, types-set, kind); values are immutable slices and
@@ -36,14 +36,16 @@ type Service struct {
 }
 
 // NewService builds a Service backed by the given providers pp, keyed
-// internally by name, using timeout as the per-provider search timeout and
-// log for pipeline diagnostics. It returns the constructed Service.
-func NewService(pp []providers.Provider, timeout time.Duration, log *zap.Logger) *Service {
+// internally by name, using timeout as the per-provider search timeout,
+// mergeWindow as how long a request waits for stragglers before answering
+// with what has arrived (0 waits for every provider), and log for pipeline
+// diagnostics. It returns the constructed Service.
+func NewService(pp []providers.Provider, timeout, mergeWindow time.Duration, log *zap.Logger) *Service {
 	m := make(map[types.Provider]providers.Provider, len(pp))
 	for _, p := range pp {
 		m[p.Name()] = p
 	}
-	return &Service{providers: m, providerTimeout: timeout, log: log}
+	return &Service{providers: m, providerTimeout: timeout, mergeWindow: mergeWindow, log: log}
 }
 
 // selectionCacheKey is the immutable key selectByCountry results are memoised under.
@@ -391,38 +393,51 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) []types.En
 const fanOutLimit = 16
 
 // fetchAll fans out the search query q to all selected providers
-// concurrently under ctx, capped at fanOutLimit in-flight calls. It returns
-// the raw POIs from the selected providers.
+// concurrently, capped at fanOutLimit in-flight calls. Once every provider
+// has reported, the merge window has elapsed, or ctx is done, it answers
+// with what has arrived; stragglers keep running on a detached context so
+// their results still land in the tile cache for the next request. It
+// returns the raw POIs collected in time.
 func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) []types.RawPoi {
 	selected := s.selectProviders(q)
-	results := make([][]types.RawPoi, len(selected))
+	bg := context.WithoutCancel(ctx)
+	sem := make(chan struct{}, fanOutLimit)
+	arrivals := make(chan []types.RawPoi, len(selected))
 
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(fanOutLimit)
-
-	for i, p := range selected {
-		i, p := i, p
-		g.Go(func() error {
-			pctx, cancel := context.WithTimeout(gctx, s.providerTimeout)
+	for _, p := range selected {
+		p := p
+		go func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			pctx, cancel := context.WithTimeout(bg, s.providerTimeout)
 			defer cancel()
 			pois, err := p.Search(pctx, q)
 			if err != nil {
 				s.log.Warn("provider error", zap.String("provider", string(p.Name())), zap.Error(err))
-				return nil //nolint:nilerr // we never want a single provider to fail the whole request
+				arrivals <- nil
+				return
 			}
-			results[i] = tagKinds(pois, p.Name())
-			return nil
-		})
+			arrivals <- tagKinds(pois, p.Name())
+		}()
 	}
-	_ = g.Wait()
 
-	total := 0
-	for _, r := range results {
-		total += len(r)
+	var window <-chan time.Time
+	if s.mergeWindow > 0 {
+		timer := time.NewTimer(s.mergeWindow)
+		defer timer.Stop()
+		window = timer.C
 	}
-	all := make([]types.RawPoi, 0, total)
-	for _, r := range results {
-		all = append(all, r...)
+
+	var all []types.RawPoi
+	for done := 0; done < len(selected); done++ {
+		select {
+		case pois := <-arrivals:
+			all = append(all, pois...)
+		case <-window:
+			return filterToSelectedProviders(all, q.Providers)
+		case <-ctx.Done():
+			return filterToSelectedProviders(all, q.Providers)
+		}
 	}
 	return filterToSelectedProviders(all, q.Providers)
 }

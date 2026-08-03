@@ -21,6 +21,12 @@ type entry struct {
 	FetchedAt   int64          `json:"fetched_at"`
 }
 
+// breakerTTL is how long a provider serves straight from cache after a failed
+// upstream fetch, bounding a dead upstream to one probe per TTL. The breaker
+// write uses a detached context because the request context is precisely what
+// just expired.
+const breakerTTL = 60 * time.Second
+
 // defaultCacheTypes is the fallback type set used when the caller doesn't specify q.Types.
 var defaultCacheTypes = []types.PoiType{
 	types.TypeSee, types.TypeEat, types.TypeDrink,
@@ -60,8 +66,11 @@ func (c *CachedProvider) IsByok() bool {
 }
 
 // Search implements providers.Provider using the tile-cache flow; non-radius
-// queries bypass the cache. ctx is the request context and q holds the
-// search query parameters. It returns the matching POIs, or an error.
+// queries bypass the cache. When the upstream fetch fails, cached entries —
+// including ones fetched at a coarser radius than requested — are served
+// instead of an error, and a short breaker skips the upstream entirely for
+// breakerTTL. ctx is the request context and q holds the search query
+// parameters. It returns the matching POIs, or an error.
 func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, error) {
 	if q.Mode != types.ModeRadius || (q.Lat == 0 && q.Lng == 0) {
 		return c.inner.Search(ctx, q)
@@ -82,14 +91,25 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 	providerName := string(c.inner.Name())
 	keys, meta := c.buildKeys(providerName, tiles, poiTypes, q.Lang)
 
-	hitPois, missingTiles := c.readCache(ctx, keys, meta, effectiveR)
+	hitPois, coarsePois, missingTiles := c.readCache(ctx, keys, meta, effectiveR)
 
 	if len(missingTiles) == 0 {
 		return hitPois, nil
 	}
 
+	breakerKey := "poi:tile:breaker:" + providerName
+	if c.rdb.Exists(ctx, breakerKey).Val() > 0 {
+		return append(hitPois, coarsePois...), nil
+	}
+
 	freshPois, _, err := c.fetchMissing(ctx, q, missingTiles, poiTypes)
 	if err != nil {
+		_ = c.rdb.Set(context.WithoutCancel(ctx), breakerKey, "1", breakerTTL).Err()
+		if len(hitPois)+len(coarsePois) > 0 {
+			c.log.Warn("tilecache: upstream fetch failed, serving cached data",
+				zap.String("provider", providerName), zap.Error(err))
+			return append(hitPois, coarsePois...), nil
+		}
 		return nil, err
 	}
 
@@ -133,12 +153,14 @@ func (c *CachedProvider) buildKeys(provider string, tiles []Tile, poiTypes []typ
 }
 
 // readCache MGets keys (paired with their (tile, type) metadata in meta)
-// using ctx and partitions results into cached POIs and the tiles needing a
-// fetch; effectiveR is the quantized radius used to reject too-coarse entries.
-func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []keyMeta, effectiveR int) ([]types.RawPoi, map[Tile]struct{}) {
-	missing := make(map[Tile]struct{})
+// using ctx and partitions results into three buckets: POIs precise enough to
+// serve as-is, POIs from entries fetched at a coarser radius than effectiveR
+// (fallback material only — their tiles are still refetched), and the tiles
+// needing a fetch.
+func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []keyMeta, effectiveR int) (hits, coarse []types.RawPoi, missing map[Tile]struct{}) {
+	missing = make(map[Tile]struct{})
 	if len(keys) == 0 {
-		return nil, missing
+		return nil, nil, missing
 	}
 
 	vals, err := c.rdb.MGet(ctx, keys...).Result()
@@ -147,10 +169,9 @@ func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []ke
 		for _, m := range meta {
 			missing[m.Tile] = struct{}{}
 		}
-		return nil, missing
+		return nil, nil, missing
 	}
 
-	var hits []types.RawPoi
 	for i, v := range vals {
 		if v == nil {
 			missing[meta[i].Tile] = struct{}{}
@@ -168,11 +189,12 @@ func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []ke
 		}
 		if e.BestRadiusM > effectiveR {
 			missing[meta[i].Tile] = struct{}{}
+			coarse = append(coarse, e.Pois...)
 			continue
 		}
 		hits = append(hits, e.Pois...)
 	}
-	return hits, missing
+	return hits, coarse, missing
 }
 
 // fetchMissing runs one inner.Search over the enclosing circle of

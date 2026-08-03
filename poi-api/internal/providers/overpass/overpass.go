@@ -6,25 +6,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/trippier/poi-api/internal/providers"
-	"github.com/trippier/poi-api/internal/tilecache"
 	"github.com/trippier/poi-api/pkg/types"
 )
 
 const defaultTimeout = 10 * time.Second
 
+// dialTimeout caps connection establishment to one mirror. Some mirrors
+// resolve to addresses that drop SYNs silently; without this bound Go's
+// dialer spreads the whole request deadline across those addresses and a
+// single dead mirror starves every mirror behind it in the failover loop.
+const dialTimeout = 2 * time.Second
+
 // defaultAPIURLs lists the public Overpass mirrors tried in order; rotating
-// across them on transport/429/5xx errors spreads the per-IP quota and adds
-// headroom without a self-hosted instance.
+// across them on transport/429/5xx errors spreads the per-IP quota. lz4
+// leads because the main endpoint queues requests for most of the provider
+// budget while lz4 either answers or fails fast.
 var defaultAPIURLs = []string{
+	"https://lz4.overpass-api.de/api/interpreter",
 	"https://overpass-api.de/api/interpreter",
 	"https://overpass.kumi.systems/api/interpreter",
-	"https://lz4.overpass-api.de/api/interpreter",
 }
 
 var osmTagMap = map[string]types.PoiType{
@@ -96,7 +103,12 @@ func New() *Provider {
 	urls := make([]string, len(defaultAPIURLs))
 	copy(urls, defaultAPIURLs)
 	return &Provider{
-		client:  &http.Client{Timeout: defaultTimeout},
+		client: &http.Client{
+			Timeout: defaultTimeout,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{Timeout: dialTimeout}).DialContext,
+			},
+		},
 		apiURLs: urls,
 	}
 }
@@ -131,7 +143,11 @@ func (p *Provider) SupportsMode(_ types.SearchMode) bool { return true }
 
 // Search queries Overpass for POIs matching q, trying each mirror in order
 // (using ctx for cancellation) and retrying only on transient failures
-// (transport, 429, 5xx). It returns the matching POIs, or an error if all mirrors failed.
+// (transport, 429, 5xx). Every attempt runs under the full remaining ctx
+// budget: the mirror order already puts the fail-fast endpoint first, so a
+// dead mirror costs little and the reliable-but-queueing one behind it keeps
+// enough time to actually answer. It returns the matching POIs, or an error
+// if all mirrors failed.
 func (p *Provider) Search(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, error) {
 	body := url.Values{"data": {p.buildQuery(q)}}.Encode()
 
@@ -362,9 +378,10 @@ func (p *Provider) resolveType(tags map[string]string) types.PoiType {
 	return types.TypeGeneric
 }
 
-// init registers this provider with the providers registry.
+// init registers this provider with the providers registry. Tile caching is
+// applied centrally at wiring time (cmd/server), not here.
 func init() {
 	providers.Register(types.ProviderOverpass, func(cfg providers.BuildConfig) (providers.Provider, error) {
-		return tilecache.NewCachedProvider(New(), cfg.Redis, cfg.CacheTTL, cfg.Log), nil
+		return New(), nil
 	})
 }

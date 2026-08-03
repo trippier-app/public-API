@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/trippier/poi-api/internal/providers"
-	"github.com/trippier/poi-api/internal/tilecache"
 	"github.com/trippier/poi-api/pkg/types"
 )
 
@@ -186,12 +185,13 @@ func (p *Provider) toRawPois(items []geonameItem) []types.RawPoi {
 	return pois
 }
 
-// init registers the GeoNames provider factory.
+// init registers the GeoNames provider factory. Tile caching is applied
+// centrally at wiring time (cmd/server), not here.
 func init() {
 	providers.Register(types.ProviderGeoNames, func(cfg providers.BuildConfig) (providers.Provider, error) {
 		if cfg.GeoNamesUsername == "" {
 			return nil, nil
 		}
-		return tilecache.NewCachedProvider(New(cfg.GeoNamesUsername), cfg.Redis, cfg.CacheTTL, cfg.Log), nil
+		return New(cfg.GeoNamesUsername), nil
 	})
 }
