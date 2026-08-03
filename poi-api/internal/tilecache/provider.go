@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/uber/h3-go/v4"
 	"go.uber.org/zap"
 
 	"github.com/trippier/poi-api/internal/providers"
@@ -111,7 +112,7 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 		return append(hitPois, coarsePois...), nil
 	}
 
-	freshPois, _, err := c.fetchMissing(ctx, q, missingTiles, poiTypes)
+	freshPois, fetchQuery, err := c.fetchMissing(ctx, q, missingTiles, poiTypes)
 	if err != nil {
 		_ = c.rdb.Set(context.WithoutCancel(ctx), breakerKey, "1", breakerTTL).Err()
 		if len(hitPois)+len(coarsePois) > 0 {
@@ -122,7 +123,9 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 		return nil, err
 	}
 
-	c.writeCache(ctx, providerName, missingTiles, poiTypes, freshPois, effectiveR, q.Lang)
+	horizon, truncated := trustHorizonM(fetchQuery.Lat, fetchQuery.Lng, freshPois, fetchQuery.Limit)
+	c.writeCache(ctx, providerName, missingTiles, poiTypes, freshPois, effectiveR, q.Lang,
+		fetchQuery.Lat, fetchQuery.Lng, horizon, truncated)
 
 	keptFresh := freshPois[:0]
 	for _, p := range freshPois {
@@ -206,10 +209,15 @@ func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []ke
 	return hits, coarse, missing
 }
 
+// cacheFillLimit is the result cap asked of the upstream when filling tiles.
+// The requester's own limit is often small; fetching more per upstream call
+// widens the area the response can genuinely testify about.
+const cacheFillLimit = 100
+
 // fetchMissing runs one inner.Search over the enclosing circle of
 // missingTiles, using ctx and query q restricted to poiTypes. It returns the
-// fetched POIs, the quantized fetch radius, and an error, if any.
-func (c *CachedProvider) fetchMissing(ctx context.Context, q types.SearchQuery, missingTiles map[Tile]struct{}, poiTypes []types.PoiType) ([]types.RawPoi, int, error) {
+// fetched POIs, the query actually sent upstream, and an error, if any.
+func (c *CachedProvider) fetchMissing(ctx context.Context, q types.SearchQuery, missingTiles map[Tile]struct{}, poiTypes []types.PoiType) ([]types.RawPoi, types.SearchQuery, error) {
 	missingList := make([]Tile, 0, len(missingTiles))
 	for t := range missingTiles {
 		missingList = append(missingList, t)
@@ -217,7 +225,7 @@ func (c *CachedProvider) fetchMissing(ctx context.Context, q types.SearchQuery, 
 
 	fetchLat, fetchLng, rawR, err := EnclosingCircle(missingList)
 	if err != nil {
-		return nil, 0, fmt.Errorf("tilecache: enclosing circle: %w", err)
+		return nil, q, fmt.Errorf("tilecache: enclosing circle: %w", err)
 	}
 	fetchR := Quantize(rawR)
 
@@ -226,18 +234,54 @@ func (c *CachedProvider) fetchMissing(ctx context.Context, q types.SearchQuery, 
 	fetchQuery.Lng = fetchLng
 	fetchQuery.Radius = fetchR
 	fetchQuery.Types = poiTypes
+	fetchQuery.Limit = max(fetchQuery.Limit, cacheFillLimit)
 
 	pois, err := c.inner.Search(ctx, fetchQuery)
 	if err != nil {
-		return nil, 0, err
+		return nil, q, err
 	}
-	return pois, fetchR, nil
+	return pois, fetchQuery, nil
+}
+
+// provisionalTTL is the lifetime of an empty sentinel written beyond the
+// evidence horizon of an untruncated response. Emptiness out there is
+// plausible but unproven (zone-shaped providers, internal caps), so it only
+// holds long enough to absorb a burst of gestures before a refetch retests it.
+const provisionalTTL = 2 * time.Minute
+
+// trustHorizonM computes how far from the fetch centre (lat, lng) the
+// response pois genuinely testifies about emptiness: up to its farthest POI
+// plus one tile edge of slack. It also reports whether the response filled
+// limit and was therefore truncated — beyond the horizon of a truncated
+// response nothing at all is known.
+//
+// @param lat - Fetch centre latitude (degrees).
+// @param lng - Fetch centre longitude (degrees).
+// @param pois - The upstream response.
+// @param limit - The result cap the upstream call was issued with.
+// @returns The evidence horizon in metres and the truncation flag.
+func trustHorizonM(lat, lng float64, pois []types.RawPoi, limit int) (float64, bool) {
+	center := h3.NewLatLng(lat, lng)
+	maxDist := 0.0
+	for _, p := range pois {
+		if p.Coords == nil {
+			continue
+		}
+		if d := h3.GreatCircleDistanceM(center, h3.NewLatLng(p.Coords.Lat, p.Coords.Lng)); d > maxDist {
+			maxDist = d
+		}
+	}
+	return maxDist + edgeMeters, limit > 0 && len(pois) >= limit
 }
 
 // writeCache pipelines one SET per (tile, type) slot in missingTiles using
 // ctx, keyed on provider, tile, type and lang; it stores freshPois bucketed
 // by tile and type (empty buckets get a sentinel) alongside bestRadius.
-func (c *CachedProvider) writeCache(ctx context.Context, provider string, missingTiles map[Tile]struct{}, poiTypes []types.PoiType, freshPois []types.RawPoi, bestRadius int, lang string) {
+// Trust is graduated by distance from (fetchLat, fetchLng): tiles within
+// horizonM get the full TTL; beyond it, a truncated response proves nothing
+// so the tile is skipped, while an untruncated one earns only a
+// provisionalTTL sentinel that soon lapses and gets retested.
+func (c *CachedProvider) writeCache(ctx context.Context, provider string, missingTiles map[Tile]struct{}, poiTypes []types.PoiType, freshPois []types.RawPoi, bestRadius int, lang string, fetchLat, fetchLng, horizonM float64, truncated bool) {
 	buckets := make(map[Tile]map[types.PoiType][]types.RawPoi, len(missingTiles))
 	for _, p := range freshPois {
 		if p.Coords == nil {
@@ -256,9 +300,21 @@ func (c *CachedProvider) writeCache(ctx context.Context, provider string, missin
 		buckets[t][p.Type] = append(buckets[t][p.Type], p)
 	}
 
+	fetchCenter := h3.NewLatLng(fetchLat, fetchLng)
 	pipe := c.rdb.Pipeline()
 	now := time.Now().Unix()
 	for t := range missingTiles {
+		ttl := c.ttl
+		lat, lng, err := TileCenter(t)
+		if err != nil {
+			continue
+		}
+		if h3.GreatCircleDistanceM(fetchCenter, h3.NewLatLng(lat, lng)) > horizonM {
+			if truncated {
+				continue
+			}
+			ttl = provisionalTTL
+		}
 		hex := TileHex(t)
 		for _, pt := range poiTypes {
 			pois := buckets[t][pt]
@@ -270,7 +326,7 @@ func (c *CachedProvider) writeCache(ctx context.Context, provider string, missin
 			if err != nil {
 				continue
 			}
-			pipe.Set(ctx, Key(provider, hex, string(pt), lang), data, c.ttl)
+			pipe.Set(ctx, Key(provider, hex, string(pt), lang), data, ttl)
 		}
 	}
 	if _, err := pipe.Exec(ctx); err != nil {

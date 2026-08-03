@@ -2,6 +2,7 @@ package tilecache_test
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -308,5 +309,132 @@ func TestCachedProvider_HugeRadius_BypassesTilePath(t *testing.T) {
 	}
 	if keys := mr.Keys(); len(keys) != 0 {
 		t.Errorf("expected no tile keys written above the radius cap, got %d", len(keys))
+	}
+}
+
+func TestCachedProvider_CappedFetch_NoFalseEmptyBeyondHorizon(t *testing.T) {
+	clustered := make([]types.RawPoi, 100)
+	for i := range clustered {
+		clustered[i] = makePoi(
+			"p"+string(rune('a'+i%26))+string(rune('0'+i/26)),
+			48.8566+float64(i)*0.0001, 2.3522, types.TypeSee)
+	}
+	m := newMock(clustered)
+	cp, _ := newCacheHarness(t, m)
+
+	wide := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 5000,
+		Types: []types.PoiType{types.TypeSee}, Limit: 30,
+	}
+	if _, err := cp.Search(context.Background(), wide); err != nil {
+		t.Fatal(err)
+	}
+	callsAfterWide := m.callCnt.Load()
+
+	edge := wide
+	edge.Lat = 48.9000
+	if _, err := cp.Search(context.Background(), edge); err != nil {
+		t.Fatal(err)
+	}
+	if m.callCnt.Load() == callsAfterWide {
+		t.Error("expected a refetch at the edge: a capped response must not sentinel tiles beyond its farthest POI")
+	}
+}
+
+type scriptedProvider struct {
+	name      types.Provider
+	callCnt   atomic.Int32
+	responses [][]types.RawPoi
+}
+
+func (s *scriptedProvider) Name() types.Provider               { return s.name }
+func (s *scriptedProvider) SupportsMode(types.SearchMode) bool { return true }
+func (s *scriptedProvider) Search(_ context.Context, _ types.SearchQuery) ([]types.RawPoi, error) {
+	i := int(s.callCnt.Add(1)) - 1
+	if i >= len(s.responses) {
+		i = len(s.responses) - 1
+	}
+	return s.responses[i], nil
+}
+
+func TestCachedProvider_TruncatedFetch_KeepsFarTilesMissing(t *testing.T) {
+	cluster := make([]types.RawPoi, 100)
+	for i := range cluster {
+		cluster[i] = makePoi(fmt.Sprintf("a%d", i), 48.8566+float64(i%10)*0.0002, 2.3522, types.TypeSee)
+	}
+	band := []types.RawPoi{makePoi("b1", 48.8566, 2.4100, types.TypeSee)}
+	p := &scriptedProvider{name: "mock", responses: [][]types.RawPoi{cluster, band}}
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	cp := tilecache.NewCachedProvider(p, rdb, time.Hour, zap.NewNop())
+
+	wide := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 5000,
+		Types: []types.PoiType{types.TypeSee}, Limit: 30,
+	}
+	if _, err := cp.Search(context.Background(), wide); err != nil {
+		t.Fatal(err)
+	}
+
+	overlap := wide
+	overlap.Lng = 2.4100
+	got, err := cp.Search(context.Background(), overlap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, poi := range got {
+		if poi.ID == "b1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the band POI: a truncated response must not seal far tiles as empty")
+	}
+}
+
+func TestCachedProvider_SparseFetch_ProvisionalEmptyDecays(t *testing.T) {
+	center := []types.RawPoi{makePoi("a1", 48.8566, 2.3522, types.TypeSee)}
+	band := []types.RawPoi{makePoi("b1", 48.8566, 2.4100, types.TypeSee)}
+	p := &scriptedProvider{name: "mock", responses: [][]types.RawPoi{center, band}}
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	cp := tilecache.NewCachedProvider(p, rdb, time.Hour, zap.NewNop())
+
+	wide := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 5000,
+		Types: []types.PoiType{types.TypeSee}, Limit: 30,
+	}
+	if _, err := cp.Search(context.Background(), wide); err != nil {
+		t.Fatal(err)
+	}
+
+	overlap := wide
+	overlap.Lng = 2.4100
+	got, err := cp.Search(context.Background(), overlap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, poi := range got {
+		if poi.ID == "b1" {
+			t.Fatal("expected the provisional empty to hold within its TTL")
+		}
+	}
+
+	mr.FastForward(3 * time.Minute)
+	got, err = cp.Search(context.Background(), overlap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, poi := range got {
+		if poi.ID == "b1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the band POI once the provisional empty lapsed")
 	}
 }
