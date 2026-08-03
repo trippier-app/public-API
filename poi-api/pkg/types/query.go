@@ -44,4 +44,8 @@ type SearchResult struct {
 	Query   SearchQuery   `json:"query"`
 	Total   int           `json:"total"`
 	Results []EnrichedPoi `json:"results"`
+
+	// Partial reports that the merge window closed before every selected
+	// provider answered; such responses must not be cached as authoritative.
+	Partial bool `json:"-"`
 }

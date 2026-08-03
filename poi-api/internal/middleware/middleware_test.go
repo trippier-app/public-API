@@ -210,3 +210,31 @@ func TestCache_KeyParameterOrderIndependent(t *testing.T) {
 		t.Errorf("param-order-independent cache: X-Cache = %q, want HIT", w.Header().Get("X-Cache"))
 	}
 }
+
+func TestCache_PartialResponseNotStored(t *testing.T) {
+	rdb := newRedis(t)
+	r := gin.New()
+	r.Use(middleware.Cache(rdb, time.Minute))
+	partial := true
+	r.GET("/pois/search", func(c *gin.Context) {
+		if partial {
+			c.Header("X-Merge-Partial", "1")
+		}
+		c.JSON(http.StatusOK, gin.H{"results": []string{}})
+	})
+
+	r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/pois/search?lat=1&lng=2", nil))
+
+	partial = false
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pois/search?lat=1&lng=2", nil))
+	if w.Header().Get("X-Cache") != "MISS" {
+		t.Errorf("X-Cache = %q, want MISS (partial response must not be stored)", w.Header().Get("X-Cache"))
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/pois/search?lat=1&lng=2", nil))
+	if w.Header().Get("X-Cache") != "HIT" {
+		t.Errorf("X-Cache = %q, want HIT (complete response must be stored)", w.Header().Get("X-Cache"))
+	}
+}

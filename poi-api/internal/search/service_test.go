@@ -332,6 +332,9 @@ func TestServiceSearch_MergeWindowAnswersWithoutStragglers(t *testing.T) {
 	if result.Total != 1 {
 		t.Errorf("expected only the fast provider's result, got %d", result.Total)
 	}
+	if !result.Partial {
+		t.Error("expected the window-cut result to be flagged partial")
+	}
 
 	select {
 	case <-slow.searched:

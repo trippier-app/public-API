@@ -36,8 +36,10 @@ func (w *cacheWriter) WriteHeader(status int) {
 }
 
 // Cache returns Gin middleware that caches 200-OK GET responses in Redis,
-// keyed by sorted query parameters; a non-empty X-No-Cache header bypasses
-// it. rdb stores cached responses and ttl is the entry time-to-live.
+// keyed by sorted query parameters; a non-empty X-No-Cache request header
+// bypasses it, and responses carrying the X-Merge-Partial header are never
+// stored (they were assembled before every provider reported). rdb stores
+// cached responses and ttl is the entry time-to-live.
 func Cache(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet {
@@ -66,7 +68,7 @@ func Cache(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc {
 
 		c.Next()
 
-		if cw.status == http.StatusOK && cw.buf.Len() > 0 {
+		if cw.status == http.StatusOK && cw.buf.Len() > 0 && cw.Header().Get("X-Merge-Partial") == "" {
 			_ = rdb.Set(ctx, key, cw.buf.Bytes(), ttl).Err()
 		}
 	}

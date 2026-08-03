@@ -56,6 +56,7 @@ func (h *Handler) search(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -75,6 +76,7 @@ func (h *Handler) searchSlim(c *gin.Context) {
 	for i, p := range result.Results {
 		slim[i] = types.SlimPoi{Name: p.Name, Type: p.Type, Coords: p.Coords}
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, types.SlimResult{Total: result.Total, Results: slim})
 }
 
@@ -91,6 +93,7 @@ func (h *Handler) searchCustom(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -110,6 +113,7 @@ func (h *Handler) searchCustomSlim(c *gin.Context) {
 	for i, p := range result.Results {
 		slim[i] = types.SlimPoi{Name: p.Name, Type: p.Type, Coords: p.Coords}
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, types.SlimResult{Total: result.Total, Results: slim})
 }
 
@@ -125,6 +129,7 @@ func (h *Handler) events(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -150,6 +155,7 @@ func (h *Handler) eventsSlim(c *gin.Context) {
 			Recurring: e.Recurring,
 		}
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, types.SlimEventResult{Total: result.Total, Results: slim})
 }
 
@@ -165,6 +171,7 @@ func (h *Handler) eventsCustom(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
 		return
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -190,6 +197,7 @@ func (h *Handler) eventsCustomSlim(c *gin.Context) {
 			Recurring: e.Recurring,
 		}
 	}
+	markPartial(c, result.Partial)
 	c.JSON(http.StatusOK, types.SlimEventResult{Total: result.Total, Results: slim})
 }
 
@@ -301,6 +309,17 @@ func allByokContext(c *gin.Context) context.Context {
 		}
 	}
 	return ctx
+}
+
+// markPartial flags a response assembled before every selected provider
+// reported, so the cache middleware skips storing it as authoritative.
+//
+// @param c - The request context the header is written to.
+// @param partial - Whether the merge window cut the fan-out short.
+func markPartial(c *gin.Context, partial bool) {
+	if partial {
+		c.Header("X-Merge-Partial", "1")
+	}
 }
 
 // errorResponse is the JSON body returned for failed requests.

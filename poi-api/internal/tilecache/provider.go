@@ -27,6 +27,12 @@ type entry struct {
 // just expired.
 const breakerTTL = 60 * time.Second
 
+// maxCachedRadiusM is the largest quantized radius served through the tile
+// path. Above it the r8 tile cover explodes (a 50 km disk spans ~36k tiles,
+// ~250k Redis keys per read) and the MGet/Set storms would stall Redis, so
+// wider searches go straight to the provider uncached.
+const maxCachedRadiusM = 10000
+
 // defaultCacheTypes is the fallback type set used when the caller doesn't specify q.Types.
 var defaultCacheTypes = []types.PoiType{
 	types.TypeSee, types.TypeEat, types.TypeDrink,
@@ -77,6 +83,9 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 	}
 
 	effectiveR := Quantize(q.Radius)
+	if effectiveR > maxCachedRadiusM {
+		return c.inner.Search(ctx, q)
+	}
 	tiles, err := TileCover(q.Lat, q.Lng, effectiveR)
 	if err != nil {
 		c.log.Warn("tilecache: cover failed, bypassing cache", zap.Error(err))

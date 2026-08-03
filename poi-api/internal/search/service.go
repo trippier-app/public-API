@@ -66,9 +66,11 @@ func (s *Service) Search(ctx context.Context, q types.SearchQuery) (*types.Searc
 			q.Providers = selected
 		}
 	}
-	merged := filterByKind(s.pipeline(ctx, &q), types.KindPOI)
-	filtered := applyFilters(merged, q)
-	return paginate(filtered, q), nil
+	pois, partial := s.pipeline(ctx, &q)
+	filtered := applyFilters(filterByKind(pois, types.KindPOI), q)
+	result := paginate(filtered, q)
+	result.Partial = partial
+	return result, nil
 }
 
 // SearchCustom is the fully-controllable variant of Search, respecting
@@ -82,9 +84,11 @@ func (s *Service) SearchCustom(ctx context.Context, q types.SearchQuery) (*types
 		}
 	}
 	q.Providers = filterExcluded(q.Providers, q.ExcludeProviders)
-	merged := filterByKind(s.pipeline(ctx, &q), types.KindPOI)
-	filtered := applyFilters(merged, q)
-	return paginate(filtered, q), nil
+	pois, partial := s.pipeline(ctx, &q)
+	filtered := applyFilters(filterByKind(pois, types.KindPOI), q)
+	result := paginate(filtered, q)
+	result.Partial = partial
+	return result, nil
 }
 
 // SearchEvents runs the pipeline restricted to event providers, stretching
@@ -92,8 +96,10 @@ func (s *Service) SearchCustom(ctx context.Context, q types.SearchQuery) (*types
 func (s *Service) SearchEvents(ctx context.Context, q types.SearchQuery) (*types.SearchResult, error) {
 	applyDefaults(&q, defaultEventProviders())
 	clampRadiusToMin(&q)
-	merged := filterByKind(s.pipeline(ctx, &q), types.KindEvent)
-	return paginate(merged, q), nil
+	pois, partial := s.pipeline(ctx, &q)
+	result := paginate(filterByKind(pois, types.KindEvent), q)
+	result.Partial = partial
+	return result, nil
 }
 
 // SearchEventsCustom is the fully-controllable variant of SearchEvents,
@@ -109,8 +115,10 @@ func (s *Service) SearchEventsCustom(ctx context.Context, q types.SearchQuery) (
 		}
 	}
 	q.Providers = filterExcluded(q.Providers, q.ExcludeProviders)
-	merged := filterByKind(s.pipeline(ctx, &q), types.KindEvent)
-	return paginate(merged, q), nil
+	pois, partial := s.pipeline(ctx, &q)
+	result := paginate(filterByKind(pois, types.KindEvent), q)
+	result.Partial = partial
+	return result, nil
 }
 
 // defaultProviders lists non-BYOK, non-event registry providers with a
@@ -364,8 +372,9 @@ func filterExcluded(pp []types.Provider, exclude []types.Provider) []types.Provi
 
 // pipeline fetches from all providers (geocoding district queries with ctx and
 // mutating q with the coordinates), then enriches, deduplicates, scores, and
-// sorts the results.
-func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) []types.EnrichedPoi {
+// sorts the results. It also reports whether the merge window closed before
+// every provider answered.
+func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) ([]types.EnrichedPoi, bool) {
 	if q.Mode == types.ModeDistrict {
 		if place, err := geo.GeocodeDistrict(ctx, q.District); err == nil {
 			q.Lat = place.Lat
@@ -375,7 +384,7 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) []types.En
 		}
 	}
 
-	raw := s.fetchAll(ctx, *q)
+	raw, partial := s.fetchAll(ctx, *q)
 	raw = geo.SetDistances(raw, q.Lat, q.Lng)
 	if q.Mode == types.ModeRadius {
 		raw = geo.FilterByRadius(raw, q.Lat, q.Lng, float64(q.Radius))
@@ -386,7 +395,7 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) []types.En
 		merged[i].Score = scoring.Score(merged[i], *q)
 	}
 	sort.Slice(merged, func(i, j int) bool { return merged[i].Score > merged[j].Score })
-	return merged
+	return merged, partial
 }
 
 // fanOutLimit caps concurrent provider Search calls per request.
@@ -397,8 +406,9 @@ const fanOutLimit = 16
 // has reported, the merge window has elapsed, or ctx is done, it answers
 // with what has arrived; stragglers keep running on a detached context so
 // their results still land in the tile cache for the next request. It
-// returns the raw POIs collected in time.
-func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) []types.RawPoi {
+// returns the raw POIs collected in time and whether any provider was still
+// pending when it answered.
+func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, bool) {
 	selected := s.selectProviders(q)
 	bg := context.WithoutCancel(ctx)
 	sem := make(chan struct{}, fanOutLimit)
@@ -434,12 +444,12 @@ func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) []types.Raw
 		case pois := <-arrivals:
 			all = append(all, pois...)
 		case <-window:
-			return filterToSelectedProviders(all, q.Providers)
+			return filterToSelectedProviders(all, q.Providers), true
 		case <-ctx.Done():
-			return filterToSelectedProviders(all, q.Providers)
+			return filterToSelectedProviders(all, q.Providers), true
 		}
 	}
-	return filterToSelectedProviders(all, q.Providers)
+	return filterToSelectedProviders(all, q.Providers), false
 }
 
 // filterToSelectedProviders drops entries from raw whose Provider isn't in

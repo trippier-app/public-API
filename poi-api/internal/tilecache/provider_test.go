@@ -288,3 +288,25 @@ func TestCachedProvider_FetchError_TripsBreaker(t *testing.T) {
 		t.Errorf("expected the breaker to skip the upstream, got %d calls", m.callCnt.Load())
 	}
 }
+
+func TestCachedProvider_HugeRadius_BypassesTilePath(t *testing.T) {
+	pois := []types.RawPoi{makePoi("p1", 48.8566, 2.3522, types.TypeSee)}
+	m := newMock(pois)
+	cp, mr := newCacheHarness(t, m)
+
+	q := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 30000,
+		Types: []types.PoiType{types.TypeSee},
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := cp.Search(context.Background(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m.callCnt.Load() != 2 {
+		t.Errorf("expected 2 direct upstream calls above the radius cap, got %d", m.callCnt.Load())
+	}
+	if keys := mr.Keys(); len(keys) != 0 {
+		t.Errorf("expected no tile keys written above the radius cap, got %d", len(keys))
+	}
+}
