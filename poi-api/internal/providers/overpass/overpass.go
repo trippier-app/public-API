@@ -16,7 +16,7 @@ import (
 	"github.com/trippier/poi-api/pkg/types"
 )
 
-const defaultTimeout = 10 * time.Second
+const defaultTimeout = 26 * time.Second
 
 // dialTimeout caps connection establishment to one mirror. Some mirrors
 // resolve to addresses that drop SYNs silently; without this bound Go's
@@ -148,7 +148,21 @@ func (p *Provider) SupportsMode(_ types.SearchMode) bool { return true }
 // dead mirror costs little and the reliable-but-queueing one behind it keeps
 // enough time to actually answer. It returns the matching POIs, or an error
 // if all mirrors failed.
+// wideRadiusM is the radius past which the upstream only answers in time when
+// the area is sparse — a dense scan that big blows any budget. Above it the
+// search still runs, but under wideRadiusBudget instead of the full provider
+// timeout, so a hopeless query fails fast and the merge stays responsive.
+const wideRadiusM = 12000
+
+// wideRadiusBudget bounds wide-radius attempts; see wideRadiusM.
+const wideRadiusBudget = 8 * time.Second
+
 func (p *Provider) Search(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, error) {
+	if q.Mode == types.ModeRadius && q.Radius > wideRadiusM {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, wideRadiusBudget)
+		defer cancel()
+	}
 	body := url.Values{"data": {p.buildQuery(q)}}.Encode()
 
 	var lastErr error
@@ -216,21 +230,21 @@ func (p *Provider) buildQuery(q types.SearchQuery) string {
 		district := escapeOQLString(q.District)
 		if q.Lat != 0 || q.Lng != 0 {
 			return fmt.Sprintf(
-				`[out:json][timeout:7];area["name"="%s"](around:100000,%.6f,%.6f)->.a;(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;`,
+				`[out:json][timeout:25];area["name"="%s"](around:100000,%.6f,%.6f)->.a;(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;`,
 				district, q.Lat, q.Lng,
 				strings.Join(nodeStmts, ""),
 				strings.Join(wayStmts, ""),
 			)
 		}
 		return fmt.Sprintf(
-			`[out:json][timeout:7];area["name"="%s"]->.a;(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;`,
+			`[out:json][timeout:25];area["name"="%s"]->.a;(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;`,
 			district,
 			strings.Join(nodeStmts, ""),
 			strings.Join(wayStmts, ""),
 		)
 	}
 	return fmt.Sprintf(
-		"[out:json][timeout:7];(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;",
+		"[out:json][timeout:25];(%s) -> .n;(%s) -> .w;.n out 400;.w out center 400;",
 		strings.Join(nodeStmts, ""),
 		strings.Join(wayStmts, ""),
 	)
