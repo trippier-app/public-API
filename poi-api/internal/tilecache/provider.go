@@ -109,7 +109,15 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 
 	breakerKey := "poi:tile:breaker:" + providerName
 	if c.rdb.Exists(ctx, breakerKey).Val() > 0 {
-		return append(hitPois, coarsePois...), nil
+		served := append(hitPois, coarsePois...)
+		if len(served) == 0 {
+			// Nothing cached to stand in for the upstream: succeeding with an
+			// empty slice would let the merge pass for complete and the HTTP
+			// cache store the amputated answer. Fail instead, so the response
+			// is flagged partial and retried once the breaker lapses.
+			return nil, fmt.Errorf("tilecache: %s breaker open, nothing cached", providerName)
+		}
+		return served, nil
 	}
 
 	freshPois, fetchQuery, err := c.fetchMissing(ctx, q, missingTiles, poiTypes)
@@ -226,6 +234,14 @@ func (c *CachedProvider) fetchMissing(ctx context.Context, q types.SearchQuery, 
 	fetchLat, fetchLng, rawR, err := EnclosingCircle(missingList)
 	if err != nil {
 		return nil, q, fmt.Errorf("tilecache: enclosing circle: %w", err)
+	}
+	// The tile cover is conservative (safety ring included), so when most of
+	// it is missing its enclosing circle can be more than twice the query's
+	// own radius — and upstream cost grows with r². Fetching the user's
+	// actual circle is then strictly cheaper; writeCache's trust horizon
+	// already grades what the response can testify about for outer tiles.
+	if q.Radius > 0 && rawR > q.Radius {
+		fetchLat, fetchLng, rawR = q.Lat, q.Lng, q.Radius
 	}
 	fetchR := Quantize(rawR)
 

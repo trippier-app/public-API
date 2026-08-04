@@ -406,13 +406,17 @@ const fanOutLimit = 16
 // has reported, the merge window has elapsed, or ctx is done, it answers
 // with what has arrived; stragglers keep running on a detached context so
 // their results still land in the tile cache for the next request. It
-// returns the raw POIs collected in time and whether any provider was still
-// pending when it answered.
+// returns the raw POIs collected in time and whether the answer is partial —
+// a provider still pending when it answered, or one that errored.
 func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, bool) {
 	selected := s.selectProviders(q)
 	bg := context.WithoutCancel(ctx)
 	sem := make(chan struct{}, fanOutLimit)
-	arrivals := make(chan []types.RawPoi, len(selected))
+	type arrival struct {
+		pois   []types.RawPoi
+		failed bool
+	}
+	arrivals := make(chan arrival, len(selected))
 
 	for _, p := range selected {
 		p := p
@@ -424,10 +428,10 @@ func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.Ra
 			pois, err := p.Search(pctx, q)
 			if err != nil {
 				s.log.Warn("provider error", zap.String("provider", string(p.Name())), zap.Error(err))
-				arrivals <- nil
+				arrivals <- arrival{failed: true}
 				return
 			}
-			arrivals <- tagKinds(pois, p.Name())
+			arrivals <- arrival{pois: tagKinds(pois, p.Name())}
 		}()
 	}
 
@@ -438,18 +442,25 @@ func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.Ra
 		window = timer.C
 	}
 
+	// A provider that *errored* degrades the answer exactly like one that
+	// missed the merge window: the response must be flagged partial either
+	// way, or the HTTP cache would store the amputated result as complete.
 	var all []types.RawPoi
+	anyFailed := false
 	for done := 0; done < len(selected); done++ {
 		select {
-		case pois := <-arrivals:
-			all = append(all, pois...)
+		case a := <-arrivals:
+			if a.failed {
+				anyFailed = true
+			}
+			all = append(all, a.pois...)
 		case <-window:
 			return filterToSelectedProviders(all, q.Providers), true
 		case <-ctx.Done():
 			return filterToSelectedProviders(all, q.Providers), true
 		}
 	}
-	return filterToSelectedProviders(all, q.Providers), false
+	return filterToSelectedProviders(all, q.Providers), anyFailed
 }
 
 // filterToSelectedProviders drops entries from raw whose Provider isn't in
