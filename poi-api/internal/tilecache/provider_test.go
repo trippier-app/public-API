@@ -282,8 +282,11 @@ func TestCachedProvider_FetchError_TripsBreaker(t *testing.T) {
 		t.Fatalf("expected 1 upstream call, got %d", m.callCnt.Load())
 	}
 
-	if _, err := cp.Search(context.Background(), q); err != nil {
-		t.Fatalf("expected a silent cache-only answer under breaker, got %v", err)
+	// Under the breaker with nothing cached, the provider must fail rather
+	// than pass an empty answer off as complete — the merge would not flag
+	// it partial and the HTTP cache would store the amputated response.
+	if _, err := cp.Search(context.Background(), q); err == nil {
+		t.Fatal("expected an error under breaker when nothing is cached")
 	}
 	if m.callCnt.Load() != 1 {
 		t.Errorf("expected the breaker to skip the upstream, got %d calls", m.callCnt.Load())
