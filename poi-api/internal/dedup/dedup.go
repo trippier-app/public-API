@@ -45,8 +45,15 @@ func providerAccuracy(p types.Provider) float64 {
 
 // Merge groups raw POIs from all providers into deduplicated EnrichedPoi
 // records, returning the resulting slice of merged POIs.
+//
+// The input is sorted first, so the outcome is a function of the set of POIs
+// alone: providers race each other and raw arrives in whatever order they
+// answered, which must never decide a merged record's content.
 func Merge(pois []types.RawPoi) []types.EnrichedPoi {
-	groups := group(pois)
+	ordered := make([]types.RawPoi, len(pois))
+	copy(ordered, pois)
+	sortCanonical(ordered)
+	groups := group(ordered)
 	result := make([]types.EnrichedPoi, 0, len(groups))
 	for _, g := range groups {
 		result = append(result, toEnriched(g))
@@ -54,12 +61,53 @@ func Merge(pois []types.RawPoi) []types.EnrichedPoi {
 	return result
 }
 
-// group clusters pois into duplicate groups using a greedy pairwise match,
-// restricted to a 9-cell spatial neighbourhood for near-O(n) performance. It
-// returns the resulting groups of duplicate POIs.
+// sortCanonical orders pois by descending provider priority, then by ID, so
+// grouping and field selection see the same sequence for the same set.
+func sortCanonical(pois []types.RawPoi) {
+	sort.SliceStable(pois, func(i, j int) bool {
+		pi, pj := providerPriority(pois[i].Provider), providerPriority(pois[j].Provider)
+		if pi != pj {
+			return pi > pj
+		}
+		return pois[i].ID < pois[j].ID
+	})
+}
+
+// group clusters pois into duplicate groups: first by shared Wikidata id —
+// strong identity that no fuzzy match may override — then with a greedy
+// pairwise match over the rest, restricted to a 9-cell spatial neighbourhood
+// for near-O(n) performance. It returns the resulting groups of duplicate
+// POIs.
+//
+// The Wikidata pass runs first because the fuzzy rules can steal: "La Tour
+// Eiffel" is a substring of "Le Carrousel de la Tour Eiffel", and whichever
+// seeds its group earlier would otherwise capture the listing that belongs
+// with the monument's own node.
 func group(pois []types.RawPoi) [][]types.RawPoi {
 	used := make([]bool, len(pois))
 	groups := make([][]types.RawPoi, 0, len(pois))
+
+	byWikidata := make(map[string][]int)
+	for i, p := range pois {
+		if p.WikidataID != "" {
+			byWikidata[p.WikidataID] = append(byWikidata[p.WikidataID], i)
+		}
+	}
+	wikidataIDs := make([]string, 0, len(byWikidata))
+	for id, members := range byWikidata {
+		if len(members) > 1 {
+			wikidataIDs = append(wikidataIDs, id)
+		}
+	}
+	sort.Strings(wikidataIDs)
+	for _, id := range wikidataIDs {
+		g := make([]types.RawPoi, 0, len(byWikidata[id]))
+		for _, i := range byWikidata[id] {
+			g = append(g, pois[i])
+			used[i] = true
+		}
+		groups = append(groups, g)
+	}
 
 	buckets := make(map[cellKey][]int, len(pois))
 	var spatialless []int
@@ -198,7 +246,12 @@ func normalizeName(s string) string {
 
 // toEnriched builds an EnrichedPoi from group by picking the
 // highest-priority provider as primary, returning the merged enriched POI.
+//
+// The group is put in canonical order first: every per-field selection below
+// walks it, and grouping fills it in spatial-bucket order, which depends on
+// geometry rather than on anything meaningful.
 func toEnriched(group []types.RawPoi) types.EnrichedPoi {
+	sortCanonical(group)
 	primary := primaryPoi(group)
 	return types.EnrichedPoi{
 		ID:          primary.ID,
@@ -208,7 +261,7 @@ func toEnriched(group []types.RawPoi) types.EnrichedPoi {
 		Coords:      bestCoords(group),
 		Zone:        primary.Zone,
 		Distance:    primary.Distance,
-		Description: firstNonEmpty(group, func(p types.RawPoi) string { return p.Description }),
+		Description: bestDescription(group),
 		Thumbnail:   firstNonEmpty(group, func(p types.RawPoi) string { return p.Thumbnail }),
 		Images:      mergeImages(group),
 		Contact:     mergeContact(group),
@@ -217,6 +270,20 @@ func toEnriched(group []types.RawPoi) types.EnrichedPoi {
 		DateEnd:     primary.DateEnd,
 		Recurring:   primary.Recurring,
 	}
+}
+
+// bestDescription returns the longest description in group, ties going to
+// the canonical order. Guide-style providers write paragraphs where map
+// providers store a one-line tag; provider priority ranks identity trust,
+// not prose, so length is the better proxy for the richer text.
+func bestDescription(group []types.RawPoi) string {
+	best := ""
+	for _, p := range group {
+		if len(p.Description) > len(best) {
+			best = p.Description
+		}
+	}
+	return best
 }
 
 // mergeSources returns one SourceLink per distinct provider that contributed to

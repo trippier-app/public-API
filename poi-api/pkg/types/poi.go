@@ -55,8 +55,10 @@ type RawPoi struct {
 	Distance  float64 `json:"distance,omitempty"`
 	// ExtraSources holds cross-references a provider knows about (e.g. a
 	// wikipedia=/wikidata= tag); they surface in EnrichedPoi.Sources after
-	// dedup but never become standalone RawPoi records, avoiding phantom POIs.
-	ExtraSources []SourceLink `json:"-"`
+	// dedup but never become standalone RawPoi records, avoiding phantom
+	// POIs. Serialised because the tile cache round-trips RawPoi through
+	// JSON — no API response carries RawPoi, only EnrichedPoi projections.
+	ExtraSources []SourceLink `json:"extra_sources,omitempty"`
 	// Event-specific fields — nil/zero for non-event POIs.
 	DateStart *time.Time `json:"date_start,omitempty"`
 	DateEnd   *time.Time `json:"date_end,omitempty"`
