@@ -508,3 +508,40 @@ func TestCachedProvider_NarrowFetch_StaysCached(t *testing.T) {
 		t.Errorf("expected the cached POI, got %d", len(got))
 	}
 }
+
+// TestCachedProvider_RoundTrip_KeepsExtraSources asserts the Redis round-trip
+// preserves cross-reference sources. They used to be tagged json:"-", so a
+// warm tile silently stripped a place of its Wikipedia/Wikidata links — the
+// same search returned four sources cold and two warm.
+func TestCachedProvider_RoundTrip_KeepsExtraSources(t *testing.T) {
+	poi := makePoi("wv1", 48.8583, 2.2944, types.TypeSee)
+	poi.ExtraSources = []types.SourceLink{
+		{Provider: "wikipedia", URL: "https://en.wikipedia.org/wiki/Eiffel_Tower"},
+		{Provider: "wikidata", URL: "https://www.wikidata.org/wiki/Q243"},
+	}
+	m := newMock([]types.RawPoi{poi})
+	cp, _ := newCacheHarness(t, m)
+
+	q := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8583, Lng: 2.2944, Radius: 1000,
+		Types: []types.PoiType{types.TypeSee},
+	}
+	if _, err := cp.Search(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	afterFill := m.callCnt.Load()
+
+	got, err := cp.Search(context.Background(), q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.callCnt.Load() != afterFill {
+		t.Fatalf("expected the repeat query to be served from cache, got %d calls", m.callCnt.Load())
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected the cached POI, got %d", len(got))
+	}
+	if len(got[0].ExtraSources) != 2 {
+		t.Fatalf("cache stripped ExtraSources: got %v", got[0].ExtraSources)
+	}
+}

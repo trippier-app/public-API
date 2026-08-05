@@ -242,3 +242,117 @@ func TestMergeContactMerge(t *testing.T) {
 		t.Error("phone should be merged from wikivoyage")
 	}
 }
+
+// TestMerge_OrderInsensitive asserts the merged record is a function of the
+// set of raw POIs alone: providers race each other, so the same places must
+// produce byte-identical output whatever order they answered in.
+func TestMerge_OrderInsensitive(t *testing.T) {
+	overpass := types.RawPoi{
+		ID: "overpass:5013364", Name: "Tour Eiffel",
+		Provider:    types.ProviderOverpass,
+		Coords:      coords(48.85830, 2.29440),
+		WikidataID:  "Q243",
+		Contact:     types.Contact{Website: "https://www.toureiffel.paris/", Phone: "+33 8 92 70 12 39"},
+		Description: "Wrought-iron lattice tower.",
+	}
+	wikivoyage := types.RawPoi{
+		ID: "wikivoyage:Paris/7th arrondissement:La Tour Eiffel", Name: "La Tour Eiffel",
+		Provider:    types.ProviderWikivoyage,
+		Coords:      coords(48.85832, 2.29441),
+		WikidataID:  "Q243",
+		Description: "A symbol of Paris and one of the most famous landmarks in the world, built by Gustave Eiffel.",
+		ExtraSources: []types.SourceLink{
+			{Provider: types.ProviderWikipedia, URL: "https://en.wikipedia.org/wiki/Eiffel_Tower"},
+			{Provider: types.ProviderWikidata, URL: "https://www.wikidata.org/wiki/Q243"},
+		},
+	}
+
+	a := dedup.Merge([]types.RawPoi{overpass, wikivoyage})
+	b := dedup.Merge([]types.RawPoi{wikivoyage, overpass})
+
+	if len(a) != 1 || len(b) != 1 {
+		t.Fatalf("expected 1 merged POI each way, got %d and %d", len(a), len(b))
+	}
+	if a[0].ID != b[0].ID || a[0].Description != b[0].Description || a[0].Contact != b[0].Contact {
+		t.Errorf("merge depends on input order:\n  %+v\n  %+v", a[0], b[0])
+	}
+	if len(a[0].Sources) != len(b[0].Sources) {
+		t.Fatalf("source counts differ by order: %d vs %d", len(a[0].Sources), len(b[0].Sources))
+	}
+	for i := range a[0].Sources {
+		if a[0].Sources[i] != b[0].Sources[i] {
+			t.Errorf("source %d differs by order: %v vs %v", i, a[0].Sources[i], b[0].Sources[i])
+		}
+	}
+	if len(a[0].Sources) != 4 {
+		t.Errorf("expected overpass+wikivoyage+wikipedia+wikidata, got %v", a[0].Sources)
+	}
+}
+
+// TestMerge_RichestDescriptionWins asserts the guide-style paragraph beats a
+// higher-priority provider's one-liner.
+func TestMerge_RichestDescriptionWins(t *testing.T) {
+	pois := []types.RawPoi{
+		{
+			ID: "overpass:1", Name: "Louvre",
+			Provider: types.ProviderOverpass, Coords: coords(48.8606, 2.3376),
+			WikidataID: "Q19675", Description: "Museum.",
+		},
+		{
+			ID: "wikivoyage:Paris:Louvre", Name: "Louvre",
+			Provider: types.ProviderWikivoyage, Coords: coords(48.8606, 2.3376),
+			WikidataID:  "Q19675",
+			Description: "The world's most visited museum, home of the Mona Lisa and thousands of works.",
+		},
+	}
+	merged := dedup.Merge(pois)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged POI, got %d", len(merged))
+	}
+	if merged[0].Description == "Museum." {
+		t.Error("the one-line description shadowed the rich one")
+	}
+}
+
+// TestMerge_WikidataIdentityBeatsSubstringTheft reproduces the carousel
+// stealing the monument's listing: "La Tour Eiffel" is a substring of "Le
+// Carrousel de la Tour Eiffel", and the carousel's group could capture the
+// Wikivoyage listing before the monument's own node — which shares its
+// Wikidata id — got a chance.
+func TestMerge_WikidataIdentityBeatsSubstringTheft(t *testing.T) {
+	carousel := types.RawPoi{
+		ID: "overpass:1293439131", Name: "Le Carrousel de la Tour Eiffel",
+		Provider: types.ProviderOverpass, Coords: coords(48.8600, 2.2933),
+	}
+	tower := types.RawPoi{
+		ID: "overpass:5013364", Name: "Tour Eiffel",
+		Provider: types.ProviderOverpass, Coords: coords(48.85824, 2.29450),
+		WikidataID: "Q243",
+	}
+	listing := types.RawPoi{
+		ID: "wikivoyage:Paris/7th arrondissement:La Tour Eiffel", Name: "La Tour Eiffel",
+		Provider: types.ProviderWikivoyage, Coords: coords(48.8583, 2.2944),
+		WikidataID:  "Q243",
+		Description: "A symbol of Paris and one of the most famous landmarks in the world.",
+	}
+
+	merged := dedup.Merge([]types.RawPoi{carousel, tower, listing})
+
+	var monument *types.EnrichedPoi
+	for i := range merged {
+		for _, s := range merged[i].Sources {
+			if s.Provider == types.ProviderWikivoyage {
+				monument = &merged[i]
+			}
+		}
+	}
+	if monument == nil {
+		t.Fatal("the wikivoyage listing vanished from the merge")
+	}
+	if monument.ID != tower.ID {
+		t.Errorf("the listing merged into %q instead of the monument's node", monument.ID)
+	}
+	if monument.Description == "" {
+		t.Error("the monument lost the listing's description")
+	}
+}

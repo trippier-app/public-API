@@ -394,7 +394,12 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) ([]types.E
 	for i := range merged {
 		merged[i].Score = scoring.Score(merged[i], *q)
 	}
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Score > merged[j].Score })
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Score != merged[j].Score {
+			return merged[i].Score > merged[j].Score
+		}
+		return merged[i].ID < merged[j].ID
+	})
 	return merged, partial
 }
 
