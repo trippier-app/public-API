@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +53,15 @@ func Cache(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc {
 			return
 		}
 
+		// A streamed answer is a sequence of revisions, not a document: the
+		// early frames are deliberately incomplete, and storing them would
+		// serve a half-finished search to the next caller as if it were the
+		// whole thing.
+		if isStreamRequest(c) {
+			c.Next()
+			return
+		}
+
 		key := cacheKey(c)
 		ctx := c.Request.Context()
 
@@ -72,6 +82,19 @@ func Cache(rdb *redis.Client, ttl time.Duration) gin.HandlerFunc {
 			_ = rdb.Set(ctx, key, cw.buf.Bytes(), ttl).Err()
 		}
 	}
+}
+
+// isStreamRequest reports whether the caller asked for a streamed answer,
+// mirroring the search handler's own test.
+//
+// @param c - The incoming request.
+// @returns Whether the answer will be a stream.
+func isStreamRequest(c *gin.Context) bool {
+	if v := c.Query("stream"); v != "" {
+		on, err := strconv.ParseBool(v)
+		return err == nil && on
+	}
+	return strings.Contains(c.GetHeader("Accept"), "application/x-ndjson")
 }
 
 // cacheKey derives a deterministic SHA-256 cache key from the request path

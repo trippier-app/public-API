@@ -385,14 +385,29 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) ([]types.E
 	}
 
 	raw, partial := s.fetchAll(ctx, *q)
+	return s.assemble(ctx, *q, raw), partial
+}
+
+// assemble turns the raw POIs gathered so far into the finished, ordered
+// result: distances, radius clipping, enrichment, dedup, scoring and sort.
+//
+// It is deliberately a pure step over whatever has arrived, so the streaming
+// path can run it again on each new provider and get exactly what a single
+// merge over the same set would have produced.
+//
+// @param ctx - Request context.
+// @param q - The search query.
+// @param raw - Every provider record collected up to now.
+// @returns The merged, scored, ordered POIs.
+func (s *Service) assemble(ctx context.Context, q types.SearchQuery, raw []types.RawPoi) []types.EnrichedPoi {
 	raw = geo.SetDistances(raw, q.Lat, q.Lng)
 	if q.Mode == types.ModeRadius {
 		raw = geo.FilterByRadius(raw, q.Lat, q.Lng, float64(q.Radius))
 	}
-	raw = s.enrichRaw(ctx, raw, *q)
+	raw = s.enrichRaw(ctx, raw, q)
 	merged := dedup.Merge(raw)
 	for i := range merged {
-		merged[i].Score = scoring.Score(merged[i], *q)
+		merged[i].Score = scoring.Score(merged[i], q)
 	}
 	sort.Slice(merged, func(i, j int) bool {
 		if merged[i].Score != merged[j].Score {
@@ -400,27 +415,39 @@ func (s *Service) pipeline(ctx context.Context, q *types.SearchQuery) ([]types.E
 		}
 		return merged[i].ID < merged[j].ID
 	})
-	return merged, partial
+	return merged
 }
 
 // fanOutLimit caps concurrent provider Search calls per request.
 const fanOutLimit = 16
 
-// fetchAll fans out the search query q to all selected providers
-// concurrently, capped at fanOutLimit in-flight calls. Once every provider
-// has reported, the merge window has elapsed, or ctx is done, it answers
-// with what has arrived; stragglers keep running on a detached context so
-// their results still land in the tile cache for the next request. It
-// returns the raw POIs collected in time and whether the answer is partial —
-// a provider still pending when it answered, or one that errored.
-func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, bool) {
-	selected := s.selectProviders(q)
+// arrival is one provider's answer, naming who it came from so a streaming
+// caller can tell which sources are still outstanding.
+type arrival struct {
+	provider types.Provider
+	pois     []types.RawPoi
+	failed   bool
+}
+
+// fanOut queries every selected provider concurrently, capped at
+// fanOutLimit in-flight calls, and returns the channel their answers land on.
+//
+// Each call runs on a context detached from the request, so a provider that
+// overruns keeps going after the caller has answered and still fills the tile
+// cache for the next one. The channel is buffered to the provider count, so
+// no goroutine blocks on a caller that stopped reading.
+//
+// @param ctx - Request context, used only as the parent for cancellation.
+// @param q - The search query handed to every provider.
+// @param selected - The providers to query.
+// @returns The channel carrying one arrival per provider.
+func (s *Service) fanOut(
+	ctx context.Context,
+	q types.SearchQuery,
+	selected []providers.Provider,
+) <-chan arrival {
 	bg := context.WithoutCancel(ctx)
 	sem := make(chan struct{}, fanOutLimit)
-	type arrival struct {
-		pois   []types.RawPoi
-		failed bool
-	}
 	arrivals := make(chan arrival, len(selected))
 
 	for _, p := range selected {
@@ -433,12 +460,25 @@ func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.Ra
 			pois, err := p.Search(pctx, q)
 			if err != nil {
 				s.log.Warn("provider error", zap.String("provider", string(p.Name())), zap.Error(err))
-				arrivals <- arrival{failed: true}
+				arrivals <- arrival{provider: p.Name(), failed: true}
 				return
 			}
-			arrivals <- arrival{pois: tagKinds(pois, p.Name())}
+			arrivals <- arrival{provider: p.Name(), pois: tagKinds(pois, p.Name())}
 		}()
 	}
+	return arrivals
+}
+
+// fetchAll fans out the search query q to all selected providers
+// concurrently, capped at fanOutLimit in-flight calls. Once every provider
+// has reported, the merge window has elapsed, or ctx is done, it answers
+// with what has arrived; stragglers keep running on a detached context so
+// their results still land in the tile cache for the next request. It
+// returns the raw POIs collected in time and whether the answer is partial —
+// a provider still pending when it answered, or one that errored.
+func (s *Service) fetchAll(ctx context.Context, q types.SearchQuery) ([]types.RawPoi, bool) {
+	selected := s.selectProviders(q)
+	arrivals := s.fanOut(ctx, q, selected)
 
 	var window <-chan time.Time
 	if s.mergeWindow > 0 {
