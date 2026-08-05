@@ -51,6 +51,10 @@ func (h *Handler) search(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if wantsStream(c) {
+		h.streamSearch(c, q, StreamOptions{Kind: types.KindPOI})
+		return
+	}
 	result, err := h.service.Search(c.Request.Context(), q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
@@ -65,6 +69,10 @@ func (h *Handler) search(c *gin.Context) {
 func (h *Handler) searchSlim(c *gin.Context) {
 	q, ok := parseQuery(c)
 	if !ok {
+		return
+	}
+	if wantsStream(c) {
+		h.streamSlim(c, q, StreamOptions{Kind: types.KindPOI})
 		return
 	}
 	result, err := h.service.Search(c.Request.Context(), q)
@@ -88,6 +96,10 @@ func (h *Handler) searchCustom(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if wantsStream(c) {
+		h.streamSearch(c, q, StreamOptions{Kind: types.KindPOI, Custom: true})
+		return
+	}
 	result, err := h.service.SearchCustom(allByokContext(c), q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
@@ -102,6 +114,10 @@ func (h *Handler) searchCustom(c *gin.Context) {
 func (h *Handler) searchCustomSlim(c *gin.Context) {
 	q, ok := parseCustomQuery(c)
 	if !ok {
+		return
+	}
+	if wantsStream(c) {
+		h.streamSlim(c, q, StreamOptions{Kind: types.KindPOI, Custom: true})
 		return
 	}
 	result, err := h.service.SearchCustom(allByokContext(c), q)
@@ -124,6 +140,10 @@ func (h *Handler) events(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if wantsStream(c) {
+		h.streamSearch(c, q, StreamOptions{Kind: types.KindEvent})
+		return
+	}
 	result, err := h.service.SearchEvents(allByokContext(c), q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
@@ -138,6 +158,10 @@ func (h *Handler) events(c *gin.Context) {
 func (h *Handler) eventsSlim(c *gin.Context) {
 	q, ok := parseQuery(c)
 	if !ok {
+		return
+	}
+	if wantsStream(c) {
+		h.streamEventsSlim(c, q, StreamOptions{Kind: types.KindEvent})
 		return
 	}
 	result, err := h.service.SearchEvents(allByokContext(c), q)
@@ -166,6 +190,10 @@ func (h *Handler) eventsCustom(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if wantsStream(c) {
+		h.streamSearch(c, q, StreamOptions{Kind: types.KindEvent, Custom: true})
+		return
+	}
 	result, err := h.service.SearchEventsCustom(allByokContext(c), q)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error"})
@@ -180,6 +208,10 @@ func (h *Handler) eventsCustom(c *gin.Context) {
 func (h *Handler) eventsCustomSlim(c *gin.Context) {
 	q, ok := parseCustomQuery(c)
 	if !ok {
+		return
+	}
+	if wantsStream(c) {
+		h.streamEventsSlim(c, q, StreamOptions{Kind: types.KindEvent, Custom: true})
 		return
 	}
 	result, err := h.service.SearchEventsCustom(allByokContext(c), q)
