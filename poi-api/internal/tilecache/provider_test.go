@@ -449,7 +449,7 @@ func TestCachedProvider_SparseFetch_ProvisionalEmptyDecays(t *testing.T) {
 // rest; trusting those slots made "Eat" return a handful of places right after
 // "For you" had been browsed.
 func TestCachedProvider_BroadFetch_DoesNotStarveNarrowQuery(t *testing.T) {
-	var pois []types.RawPoi
+	pois := make([]types.RawPoi, 0, 41)
 	for i := range 40 {
 		pois = append(pois, makePoi(fmt.Sprintf("see%d", i), 48.8566, 2.3522, types.TypeSee))
 	}
