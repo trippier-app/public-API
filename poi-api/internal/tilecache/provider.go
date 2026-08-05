@@ -19,6 +19,7 @@ import (
 type entry struct {
 	Pois        []types.RawPoi `json:"pois"`
 	BestRadiusM int            `json:"best_radius"`
+	TypeBreadth int            `json:"type_breadth"`
 	FetchedAt   int64          `json:"fetched_at"`
 }
 
@@ -101,7 +102,7 @@ func (c *CachedProvider) Search(ctx context.Context, q types.SearchQuery) ([]typ
 	providerName := string(c.inner.Name())
 	keys, meta := c.buildKeys(providerName, tiles, poiTypes, q.Lang)
 
-	hitPois, coarsePois, missingTiles := c.readCache(ctx, keys, meta, effectiveR)
+	hitPois, coarsePois, missingTiles := c.readCache(ctx, keys, meta, effectiveR, len(poiTypes))
 
 	if len(missingTiles) == 0 {
 		return hitPois, nil
@@ -174,10 +175,15 @@ func (c *CachedProvider) buildKeys(provider string, tiles []Tile, poiTypes []typ
 
 // readCache MGets keys (paired with their (tile, type) metadata in meta)
 // using ctx and partitions results into three buckets: POIs precise enough to
-// serve as-is, POIs from entries fetched at a coarser radius than effectiveR
-// (fallback material only — their tiles are still refetched), and the tiles
+// serve as-is, POIs from entries fetched less precisely than the current query
+// — a coarser radius than effectiveR, or a broader type set than typeBreadth
+// (fallback material only — their tiles are still refetched) — and the tiles
 // needing a fetch.
-func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []keyMeta, effectiveR int) (hits, coarse []types.RawPoi, missing map[Tile]struct{}) {
+//
+// @param effectiveR - Quantized radius of the current query.
+// @param typeBreadth - How many categories the current query asks for.
+// @returns The precise POIs, the imprecise ones, and the tiles to refetch.
+func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []keyMeta, effectiveR, typeBreadth int) (hits, coarse []types.RawPoi, missing map[Tile]struct{}) {
 	missing = make(map[Tile]struct{})
 	if len(keys) == 0 {
 		return nil, nil, missing
@@ -207,7 +213,7 @@ func (c *CachedProvider) readCache(ctx context.Context, keys []string, meta []ke
 			missing[meta[i].Tile] = struct{}{}
 			continue
 		}
-		if e.BestRadiusM > effectiveR {
+		if e.BestRadiusM > effectiveR || e.TypeBreadth > typeBreadth {
 			missing[meta[i].Tile] = struct{}{}
 			coarse = append(coarse, e.Pois...)
 			continue
@@ -337,7 +343,12 @@ func (c *CachedProvider) writeCache(ctx context.Context, provider string, missin
 			if pois == nil {
 				pois = []types.RawPoi{}
 			}
-			e := entry{Pois: pois, BestRadiusM: bestRadius, FetchedAt: now}
+			e := entry{
+				Pois:        pois,
+				BestRadiusM: bestRadius,
+				TypeBreadth: len(poiTypes),
+				FetchedAt:   now,
+			}
 			data, err := json.Marshal(e)
 			if err != nil {
 				continue

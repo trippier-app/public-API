@@ -441,3 +441,70 @@ func TestCachedProvider_SparseFetch_ProvisionalEmptyDecays(t *testing.T) {
 		t.Error("expected the band POI once the provisional empty lapsed")
 	}
 }
+
+// TestCachedProvider_BroadFetch_DoesNotStarveNarrowQuery asserts that slots
+// filled by a wide, capped multi-type fetch are not served as authoritative to
+// a later single-type query. The upstream response is capped, so a broad fetch
+// spends its budget on whatever the area has most of and under-reports the
+// rest; trusting those slots made "Eat" return a handful of places right after
+// "For you" had been browsed.
+func TestCachedProvider_BroadFetch_DoesNotStarveNarrowQuery(t *testing.T) {
+	pois := make([]types.RawPoi, 0, 41)
+	for i := range 40 {
+		pois = append(pois, makePoi(fmt.Sprintf("see%d", i), 48.8566, 2.3522, types.TypeSee))
+	}
+	pois = append(pois, makePoi("eat1", 48.8566, 2.3522, types.TypeEat))
+	m := newMock(pois)
+	cp, _ := newCacheHarness(t, m)
+
+	broad := types.SearchQuery{Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 1000}
+	if _, err := cp.Search(context.Background(), broad); err != nil {
+		t.Fatal(err)
+	}
+	afterBroad := m.callCnt.Load()
+
+	narrow := broad
+	narrow.Types = []types.PoiType{types.TypeEat}
+	got, err := cp.Search(context.Background(), narrow)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if m.callCnt.Load() == afterBroad {
+		t.Fatal("the narrow query was served from the broad fetch's slots instead of refetching")
+	}
+	if len(got) == 0 {
+		t.Error("expected the narrow query to surface its category")
+	}
+	if want := []types.PoiType{types.TypeEat}; m.lastQ.Types == nil || m.lastQ.Types[0] != want[0] {
+		t.Errorf("refetch went upstream with types %v, want %v", m.lastQ.Types, want)
+	}
+}
+
+// TestCachedProvider_NarrowFetch_StaysCached asserts the ladder only tightens
+// in one direction: a slot filled by a single-type fetch is precise enough to
+// serve the same single-type query again, without a second upstream call.
+func TestCachedProvider_NarrowFetch_StaysCached(t *testing.T) {
+	m := newMock([]types.RawPoi{makePoi("eat1", 48.8566, 2.3522, types.TypeEat)})
+	cp, _ := newCacheHarness(t, m)
+
+	narrow := types.SearchQuery{
+		Mode: types.ModeRadius, Lat: 48.8566, Lng: 2.3522, Radius: 1000,
+		Types: []types.PoiType{types.TypeEat},
+	}
+	if _, err := cp.Search(context.Background(), narrow); err != nil {
+		t.Fatal(err)
+	}
+	afterFirst := m.callCnt.Load()
+
+	got, err := cp.Search(context.Background(), narrow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.callCnt.Load() != afterFirst {
+		t.Errorf("expected the repeat query to be served from cache, got %d calls", m.callCnt.Load())
+	}
+	if len(got) != 1 {
+		t.Errorf("expected the cached POI, got %d", len(got))
+	}
+}
