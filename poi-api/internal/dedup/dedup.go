@@ -2,6 +2,7 @@
 package dedup
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -253,12 +254,14 @@ func normalizeName(s string) string {
 func toEnriched(group []types.RawPoi) types.EnrichedPoi {
 	sortCanonical(group)
 	primary := primaryPoi(group)
+	coords := bestCoords(group)
 	return types.EnrichedPoi{
 		ID:          primary.ID,
+		StableID:    stableID(group, primary.Name, coords),
 		Name:        primary.Name,
 		Kind:        primary.Kind,
 		Type:        primary.Type,
-		Coords:      bestCoords(group),
+		Coords:      coords,
 		Zone:        primary.Zone,
 		Distance:    primary.Distance,
 		Description: bestDescription(group),
@@ -270,6 +273,37 @@ func toEnriched(group []types.RawPoi) types.EnrichedPoi {
 		DateEnd:     primary.DateEnd,
 		Recurring:   primary.Recurring,
 	}
+}
+
+// stableIDGridDeg is the cell the fallback identity snaps coordinates to,
+// about 110 m. Providers disagree on a monument's exact point by a few dozen
+// metres, and the merged coordinate follows whichever of them currently
+// leads — a finer grid would hand the same place a new identity the moment a
+// better-placed provider arrives.
+const stableIDGridDeg = 0.001
+
+// stableID derives an identity for a merged place that does not move when the
+// group grows. A shared Wikidata id is used when the group carries one, since
+// it names the place across languages and providers; otherwise the normalized
+// name and a coarse coordinate cell stand in.
+//
+// @param group - The merged duplicates.
+// @param name - The primary record's name.
+// @param coords - The merged coordinates, possibly nil.
+// @returns An identity stable across successive merges of the same place.
+func stableID(group []types.RawPoi, name string, coords *types.Coordinates) string {
+	for _, p := range group {
+		if p.WikidataID != "" {
+			return "wd:" + p.WikidataID
+		}
+	}
+	slug := normalizeName(name)
+	if coords == nil {
+		return "name:" + slug
+	}
+	lat := math.Round(coords.Lat/stableIDGridDeg) * stableIDGridDeg
+	lng := math.Round(coords.Lng/stableIDGridDeg) * stableIDGridDeg
+	return fmt.Sprintf("geo:%s@%.3f,%.3f", slug, lat, lng)
 }
 
 // bestDescription returns the longest description in group, ties going to

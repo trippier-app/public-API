@@ -103,7 +103,12 @@ type SourceLink struct {
 // EnrichedPoi is the final merged, scored result returned to the caller;
 // per-provider detail is folded into the top-level fields — follow Sources[i].URL for more.
 type EnrichedPoi struct {
-	ID          string       `json:"id"`
+	ID string `json:"id"`
+	// StableID identifies the place rather than the record: ID is the winning
+	// provider's, so it changes when a higher-priority provider joins the
+	// merge — which streaming makes visible, since a place can be sent once
+	// before that provider lands and again after. Clients should key on this.
+	StableID    string       `json:"stable_id"`
 	Name        string       `json:"name"`
 	Kind        PointKind    `json:"kind"`
 	Type        PoiType      `json:"type"`
